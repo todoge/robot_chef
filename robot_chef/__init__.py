@@ -1,5 +1,5 @@
 """Robot chef fried rice demonstration package."""
 
-from . import actions, config, executor, simulation
+from . import actions, config, control, env, executor, perception, simulation, tasks
 
-__all__ = ["actions", "config", "executor", "simulation"]
+__all__ = ["actions", "config", "control", "env", "executor", "perception", "simulation", "tasks"]

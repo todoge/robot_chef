@@ -1,10 +1,13 @@
+# robot_chef/actions.py
 """Action primitives implementing the fried rice recipe."""
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence, Tuple
+
+import pybullet as p
 
 from . import config
 from .simulation import RobotChefSimulation, interpolate_circle
@@ -24,8 +27,20 @@ class ActionPrimitive:
         raise NotImplementedError
 
 
+# ------------------------ Helpers ------------------------
+
+def _rpy_to_quat(rpy: Tuple[float, float, float]) -> Tuple[float, float, float, float]:
+    return tuple(p.getQuaternionFromEuler(rpy))  # (x, y, z, w)
+
+
+def _controller_available(sim: RobotChefSimulation) -> bool:
+    return hasattr(sim, "controller") and sim.controller is not None
+
+
+# ------------------------ Actions ------------------------
+
 class PourBowlToPan(ActionPrimitive):
-    """Pick up a bowl and pour it into the pan."""
+    """Pick up a bowl and pour it into the pan (controller-first)."""
 
     name = "A1_pour_bowl"
 
@@ -33,32 +48,66 @@ class PourBowlToPan(ActionPrimitive):
         self.ingredient = ingredient
 
     def run(self, sim: RobotChefSimulation) -> ActionResult:
-        bowl = sim.objects[f"bowl_{self.ingredient}"]
-        pan = sim.objects["pan"]
-        right_arm = sim.robots.right_arm
-        sim.robots.open_gripper(right_arm)
+        # Resolve bowl object name (support both default bowls and recipe bowl)
+        bowl = sim.objects.get(f"bowl_{self.ingredient}") or sim.objects.get("rice_bowl")
+        if bowl is None:
+            return ActionResult(self.name, False, f"Bowl for '{self.ingredient}' not found.")
 
+        pan = sim.objects.get("pan")
+        if pan is None:
+            return ActionResult(self.name, False, "Pan not found.")
+
+        # Waypoints in world coordinates
         approach_height = config.TABLE_HEIGHT + 0.25
         pre_grasp = (bowl.pose.position[0], bowl.pose.position[1], approach_height)
         grasp_pose = (bowl.pose.position[0], bowl.pose.position[1], bowl.pose.position[2] + 0.05)
+        above_pan = (pan.pose.position[0], pan.pose.position[1], pan.pose.position[2] + 0.25)
 
+        # Nominal tool orientations
+        down_quat = _rpy_to_quat((math.pi, 0.0, 0.0))
+        tilt_quat = _rpy_to_quat((math.pi - config.POUR_TILT_ANGLE, 0.0, 0.0))
+
+        if _controller_available(sim):
+            ctrl = sim.controller
+            # Open, approach, grasp
+            ctrl.add_waypoint(pre_grasp, down_quat, gripper="open", dwell=0.05)
+            ctrl.add_waypoint(grasp_pose, down_quat, gripper="open", dwell=0.05)
+            ctrl.add_waypoint(grasp_pose, down_quat, gripper="close", dwell=0.2)
+            # Lift and move to pan
+            ctrl.add_waypoint(pre_grasp, down_quat, gripper="close", dwell=0.0)
+            ctrl.add_waypoint(above_pan, down_quat, gripper="close", dwell=0.05)
+            # Tilt to pour and hold
+            ctrl.add_waypoint(above_pan, tilt_quat, gripper="close", dwell=0.0)
+            # Hold in tilted pose for pour time
+            ctrl.add_waypoint(above_pan, tilt_quat, gripper="close", dwell=config.SIMULATION_STEP * 0)  # dwell is handled next
+            # Return upright, go back to bowl place, release
+            ctrl.add_waypoint(above_pan, down_quat, gripper="close", dwell=0.0)
+            ctrl.add_waypoint(pre_grasp, down_quat, gripper="close", dwell=0.0)
+            ctrl.add_waypoint(grasp_pose, down_quat, gripper="open", dwell=0.05)
+
+            ok = bool(ctrl.execute_planned())
+            # Simulate pour "hold" by stepping (keeps physics running while tilted)
+            sim.step_simulation(int(max(1, config.POUR_TILT_ANGLE / 1.0) + config.SIMULATION_STEP * 0))
+            return ActionResult(self.name, ok, f"Poured {self.ingredient} into pan (controller).")
+
+        # ---------------- Fallback: original joint-space routine ----------------
+        right_arm = sim.robots.right_arm
+        sim.robots.open_gripper(right_arm)
         sim.robots.move_eef_to_pose(right_arm, pre_grasp, (math.pi, 0, 0))
         sim.robots.move_eef_to_pose(right_arm, grasp_pose, (math.pi, 0, 0))
         sim.robots.close_gripper(right_arm)
         sim.step_simulation(60)
 
-        pour_position = (pan.pose.position[0], pan.pose.position[1], pan.pose.position[2] + 0.25)
-        sim.robots.move_eef_to_pose(right_arm, pour_position, (math.pi, 0, 0))
+        sim.robots.move_eef_to_pose(right_arm, above_pan, (math.pi, 0, 0))
         sim.step_simulation(60)
 
-        tilt_orientation = (math.pi - config.POUR_TILT_ANGLE, 0, 0)
-        sim.robots.move_eef_to_pose(right_arm, pour_position, tilt_orientation)
+        sim.robots.move_eef_to_pose(right_arm, above_pan, (math.pi - config.POUR_TILT_ANGLE, 0, 0))
         sim.step_simulation(240)
 
         sim.robots.move_eef_to_pose(right_arm, pre_grasp, (math.pi, 0, 0))
         sim.robots.open_gripper(right_arm)
         sim.step_simulation(30)
-        return ActionResult(self.name, True, f"Poured {self.ingredient} into pan")
+        return ActionResult(self.name, True, f"Poured {self.ingredient} into pan (fallback).")
 
 
 class StirFry(ActionPrimitive):
