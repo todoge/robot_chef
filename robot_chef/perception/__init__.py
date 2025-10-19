@@ -1,13 +1,5 @@
-"""Perception utilities for RGB-D sensing and geometric reasoning."""
+"""Perception submodule for Robot Chef."""
 
-from .camera import Camera
-from .bowl_rim import (
-    configure_scene_context,
-    detect_bowl_rim,
-)
+from __future__ import annotations
 
-__all__ = [
-    "Camera",
-    "configure_scene_context",
-    "detect_bowl_rim",
-]
+__all__ = ["bowl_rim"]

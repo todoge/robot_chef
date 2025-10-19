@@ -1,5 +1,7 @@
-"""Robot chef fried rice demonstration package."""
+"""Robot Chef runtime package."""
 
-from . import actions, config, control, env, executor, perception, simulation, tasks
+from __future__ import annotations
 
-__all__ = ["actions", "config", "control", "env", "executor", "perception", "simulation", "tasks"]
+__all__ = [
+    "config",
+]

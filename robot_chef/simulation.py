@@ -1,357 +1,314 @@
-# robot_chef/simulation.py
-"""PyBullet simulation utilities for the robot chef demo."""
+"""Simulation harness for the Robot Chef pouring task."""
 
 from __future__ import annotations
 
+import logging
 import math
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import pybullet as p
 import pybullet_data
 
-from .controller import WaypointController
-from . import config
-from .env.objects.pan import create_pan
-from .env.objects.rice_bowl import create_rice_bowl
+from .config import Pose6D, PourTaskConfig
+from .env.objects import pan as pan_factory
+from .env.objects import rice_bowl as bowl_factory
 from .env.particles import ParticleSet, spawn_spheres
 
-
-def pose6d_to_object_pose(pose: config.Pose6D) -> config.ObjectPose:
-    return config.ObjectPose(position=pose.position, orientation_rpy=pose.orientation_rpy)
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
-class LoadedObject:
-    """Container storing metadata for spawned objects."""
+class ArmState:
     body_id: int
-    name: str
-    pose: config.ObjectPose
-    properties: Dict[str, float] = field(default_factory=dict)
+    joint_indices: Tuple[int, ...]
+    ee_link: int
+    finger_joints: Tuple[int, int]
+    joint_lower: Tuple[float, ...]
+    joint_upper: Tuple[float, ...]
+    joint_ranges: Tuple[float, ...]
+    joint_rest: Tuple[float, ...]
 
 
-class DualArmRobot:
-    """Wrapper around two single-arm manipulators in PyBullet (Franka Panda)."""
+class RobotChefSimulation:
+    """Encapsulates the physics world, robot arms, and task objects."""
 
-    def __init__(
-        self,
-        client_id: int,
-        *,
-        left_base: config.ObjectPose = config.LEFT_ARM_BASE,
-        right_base: config.ObjectPose = config.RIGHT_ARM_BASE,
-    ) -> None:
-        self.client_id = client_id
-        self.left_arm = self._load_arm(left_base, base_name="left")
-        self.right_arm = self._load_arm(right_base, base_name="right")
+    def __init__(self, gui: bool, recipe: PourTaskConfig):
+        self.recipe = recipe
+        self.gui = gui
+        self.client_id = p.connect(p.GUI if gui else p.DIRECT)
+        LOGGER.info("Connected to PyBullet with client_id=%s (gui=%s)", self.client_id, gui)
 
-    def _load_arm(self, pose: config.ObjectPose, base_name: str) -> Dict[str, object]:
-        position = pose.position
-        orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
-        arm = p.loadURDF(
-            fileName="franka_panda/panda.urdf",
-            basePosition=position,
-            baseOrientation=orientation,
+        self.dt = 1.0 / 240.0
+        p.resetSimulation(physicsClientId=self.client_id)
+        p.setPhysicsEngineParameter(numSolverIterations=120, fixedTimeStep=self.dt, physicsClientId=self.client_id)
+        p.setTimeStep(self.dt, physicsClientId=self.client_id)
+        p.setGravity(0.0, 0.0, -9.81, physicsClientId=self.client_id)
+        p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client_id)
+
+        self.objects: Dict[str, Dict[str, object]] = {}
+        self.particles: Optional[ParticleSet] = None
+
+        self._setup_environment()
+        self.left_arm = self._spawn_arm(base_position=[-0.25, 0.55, 0.0], base_orientation=p.getQuaternionFromEuler([0.0, 0.0, math.pi / 2.0]))
+        self.right_arm = self._spawn_arm(base_position=[-0.25, -0.55, 0.0], base_orientation=p.getQuaternionFromEuler([0.0, 0.0, -math.pi / 2.0]))
+
+        # Default active arm is the right arm for pouring motions.
+        self._active_arm_name = "right"
+        self.gripper_open()
+        self.step_simulation(steps=60)
+
+    # ------------------------------------------------------------------ #
+    # Environment & robot helpers
+
+    def _setup_environment(self) -> None:
+        LOGGER.info("Setting up environment objects")
+        plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
+        self.objects["plane"] = {"body_id": plane_id}
+
+        # Position the table so that its surface aligns with z ~ 0.75 (matching recipe poses).
+        table_height_offset = 0.0
+        table_pos = [0.5, 0.0, table_height_offset]
+        table_orientation = p.getQuaternionFromEuler([0.0, 0.0, math.radians(self.recipe.scene.world_yaw_deg)])
+        table_id = p.loadURDF(
+            "table/table.urdf",
+            basePosition=table_pos,
+            baseOrientation=table_orientation,
             useFixedBase=True,
             physicsClientId=self.client_id,
         )
-        end_effector_link = 11  # panda_hand
-        arm_joint_indices: List[int] = []
-        lower_limits: List[float] = []
-        upper_limits: List[float] = []
+        self.objects["table"] = {"body_id": table_id, "base_position": table_pos}
+
+        bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
+        bowl_id, bowl_props = bowl_factory.create_rice_bowl(self.client_id, pose=bowl_pose)
+        self.objects["bowl"] = {"body_id": bowl_id, "properties": bowl_props, "pose": bowl_pose}
+
+        pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
+        pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
+        self.objects["pan"] = {"body_id": pan_id, "properties": pan_props, "pose": pan_pose}
+
+    def _spawn_arm(self, base_position: Sequence[float], base_orientation: Sequence[float]) -> ArmState:
+        flags = p.URDF_USE_SELF_COLLISION | p.URDF_USE_SELF_COLLISION_EXCLUDE_ALL_PARENTS
+        arm_id = p.loadURDF(
+            "franka_panda/panda.urdf",
+            basePosition=base_position,
+            baseOrientation=base_orientation,
+            useFixedBase=True,
+            flags=flags,
+            physicsClientId=self.client_id,
+        )
+        joint_indices: List[int] = []
+        joint_lower: List[float] = []
+        joint_upper: List[float] = []
+        joint_rest: List[float] = []
         joint_ranges: List[float] = []
-        joint_damping: List[float] = []
-        rest_pose: List[float] = []
-        finger_joints: List[int] = []
 
-        num_joints = p.getNumJoints(arm, physicsClientId=self.client_id)
-        for joint_index in range(num_joints):
-            info = p.getJointInfo(arm, joint_index, physicsClientId=self.client_id)
-            joint_name = info[1].decode("utf-8")
+        for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
+            info = p.getJointInfo(arm_id, j, physicsClientId=self.client_id)
             joint_type = info[2]
+            if joint_type != p.JOINT_REVOLUTE:
+                continue
+            joint_indices.append(j)
+            joint_lower.append(info[8])
+            joint_upper.append(info[9])
+            joint_ranges.append(info[9] - info[8])
+            joint_rest.append((info[8] + info[9]) * 0.5 if info[8] < info[9] else 0.0)
+            if len(joint_indices) == 7:
+                break
 
-            if joint_name in ("panda_finger_joint1", "panda_finger_joint2"):
-                finger_joints.append(joint_index)
+        if len(joint_indices) != 7:
+            raise RuntimeError("Expected Franka Panda arm with 7 revolute joints")
 
-            if joint_name.startswith("panda_joint") and joint_type in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
-                arm_joint_indices.append(joint_index)
-                lower_limits.append(info[8])
-                upper_limits.append(info[9])
-                joint_ranges.append(info[9] - info[8] if info[9] > info[8] else 2.0 * math.pi)
-                joint_damping.append(info[6])
-                rest_pose.append(p.getJointState(arm, joint_index, physicsClientId=self.client_id)[0])
+        ee_link = p.getBodyInfo(arm_id, physicsClientId=self.client_id)[0].decode()
+        # Panda end-effector link is named "panda_hand". Find its index.
+        ee_link_index = None
+        for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
+            info = p.getJointInfo(arm_id, j, physicsClientId=self.client_id)
+            if info[12].decode() == "panda_hand":
+                ee_link_index = j
+                break
+        if ee_link_index is None:
+            LOGGER.warning("panda_hand link not found; defaulting to final arm joint link")
+            ee_link_index = joint_indices[-1]
 
-        if len(arm_joint_indices) != 7:
-            raise RuntimeError(f"Expected 7 arm joints for Franka, got {len(arm_joint_indices)}")
+        finger_joint_names = {"panda_finger_joint1", "panda_finger_joint2"}
+        fingers: List[int] = []
+        for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
+            info = p.getJointInfo(arm_id, j, physicsClientId=self.client_id)
+            if info[1].decode() in finger_joint_names:
+                fingers.append(j)
+        if len(fingers) != 2:
+            raise RuntimeError("Failed to locate Panda finger joints")
 
-        return {
-            "body": arm,
-            "eef": end_effector_link,
-            "name": base_name,
-            "arm_joints": arm_joint_indices,
-            "joint_lower_limits": lower_limits,
-            "joint_upper_limits": upper_limits,
-            "joint_ranges": joint_ranges,
-            "joint_damping": joint_damping,
-            "finger_joints": finger_joints,  # usually [9,10]
-            "rest_pose": rest_pose,
-        }
-
-    # Simple gripper helpers for the Panda
-    def open_gripper(self, arm: Dict[str, object], width: float = 0.08) -> None:
-        finger_joints = arm.get("finger_joints", [9, 10])  # type: ignore[assignment]
-        for j in finger_joints:
+        for idx in joint_indices:
+            p.resetJointState(arm_id, idx, targetValue=0.0, targetVelocity=0.0, physicsClientId=self.client_id)
             p.setJointMotorControl2(
-                arm["body"],  # type: ignore[index]
-                int(j),
-                p.POSITION_CONTROL,
-                targetPosition=width,
-                force=100,
+                arm_id,
+                idx,
+                controlMode=p.POSITION_CONTROL,
+                targetPosition=0.0,
+                force=240.0,
                 physicsClientId=self.client_id,
             )
 
-    def close_gripper(self, arm: Dict[str, object], force: float = 60.0) -> None:
-        finger_joints = arm.get("finger_joints", [9, 10])  # type: ignore[assignment]
-        for j in finger_joints:
+        return ArmState(
+            body_id=arm_id,
+            joint_indices=tuple(joint_indices),
+            ee_link=ee_link_index,
+            finger_joints=(fingers[0], fingers[1]),
+            joint_lower=tuple(joint_lower),
+            joint_upper=tuple(joint_upper),
+            joint_ranges=tuple(joint_ranges),
+            joint_rest=tuple(joint_rest),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Public API
+
+    def step_simulation(self, steps: int) -> None:
+        for _ in range(max(1, int(steps))):
+            p.stepSimulation(physicsClientId=self.client_id)
+
+    def get_joint_state(self, arm: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray]:
+        arm_state = self._get_arm(arm)
+        q = []
+        dq = []
+        for idx in arm_state.joint_indices:
+            state = p.getJointState(arm_state.body_id, idx, physicsClientId=self.client_id)
+            q.append(state[0])
+            dq.append(state[1])
+        return np.asarray(q, dtype=float), np.asarray(dq, dtype=float)
+
+    def set_joint_positions(self, q_target: Sequence[float], arm: Optional[str] = None, kp: float = 0.3) -> None:
+        arm_state = self._get_arm(arm)
+        if len(q_target) != len(arm_state.joint_indices):
+            raise ValueError("q_target must have length 7 for the Panda arm")
+        p.setJointMotorControlArray(
+            bodyUniqueId=arm_state.body_id,
+            jointIndices=list(arm_state.joint_indices),
+            controlMode=p.POSITION_CONTROL,
+            targetPositions=list(q_target),
+            positionGains=[kp] * len(arm_state.joint_indices),
+            forces=[240.0] * len(arm_state.joint_indices),
+            physicsClientId=self.client_id,
+        )
+
+    def set_joint_velocities(
+        self,
+        qdot_target: Sequence[float],
+        arm: Optional[str] = None,
+        max_force: float = 180.0,
+    ) -> None:
+        arm_state = self._get_arm(arm)
+        if len(qdot_target) != len(arm_state.joint_indices):
+            raise ValueError("qdot_target must have length 7 for the Panda arm")
+        p.setJointMotorControlArray(
+            bodyUniqueId=arm_state.body_id,
+            jointIndices=list(arm_state.joint_indices),
+            controlMode=p.VELOCITY_CONTROL,
+            targetVelocities=list(qdot_target),
+            forces=[max_force] * len(arm_state.joint_indices),
+            physicsClientId=self.client_id,
+        )
+
+    def gripper_open(self, width: float = 0.08, arm: Optional[str] = None) -> None:
+        arm_state = self._get_arm(arm)
+        target = max(width * 0.5, 0.0)
+        for joint_id in arm_state.finger_joints:
             p.setJointMotorControl2(
-                arm["body"],  # type: ignore[index]
-                int(j),
-                p.POSITION_CONTROL,
+                arm_state.body_id,
+                joint_id,
+                controlMode=p.POSITION_CONTROL,
+                targetPosition=target,
+                force=100.0,
+                physicsClientId=self.client_id,
+            )
+
+    def gripper_close(self, force: float = 60.0, arm: Optional[str] = None) -> None:
+        arm_state = self._get_arm(arm)
+        for joint_id in arm_state.finger_joints:
+            p.setJointMotorControl2(
+                arm_state.body_id,
+                joint_id,
+                controlMode=p.POSITION_CONTROL,
                 targetPosition=0.0,
                 force=force,
                 physicsClientId=self.client_id,
             )
 
-
-class RobotChefSimulation:
-    """High-level helper that loads the environment and robots."""
-
-    def __init__(self, gui: bool = True, recipe: Optional[config.PourTaskConfig] = None) -> None:
-        self.client_id = p.connect(p.GUI if gui else p.DIRECT)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.resetSimulation(physicsClientId=self.client_id)
-        p.setGravity(0, 0, -9.81, physicsClientId=self.client_id)
-
-        # Time step & convenience dt for controllers
-        p.setTimeStep(config.SIMULATION_STEP, physicsClientId=self.client_id)
-        self.dt = config.SIMULATION_STEP
-        self.sim_time = 0.0
-
-        # Scene rotation
-        self.recipe_config = recipe
-        self.world_yaw_rad = math.radians(recipe.scene.world_yaw_deg) if recipe is not None else 0.0
-        self._cos_yaw = math.cos(self.world_yaw_rad)
-        self._sin_yaw = math.sin(self.world_yaw_rad)
-
-        # Robots
-        left_base = self._rotate_object_pose(config.LEFT_ARM_BASE)
-        right_base = self._rotate_object_pose(config.RIGHT_ARM_BASE)
-        self.robots = DualArmRobot(self.client_id, left_base=left_base, right_base=right_base)
-        # Expose common handles for convenience
-        self.right_arm = self.robots.right_arm
-        self.left_arm = self.robots.left_arm
-
-        # Objects & particles
-        self.objects: Dict[str, LoadedObject] = {}
-        self.particles: Optional[ParticleSet] = None
-
-        # IDs the task expects
-        self.bowl_body: Optional[int] = None  # rice bowl body id
-        self.pan_body: Optional[int] = None   # pan body id
-
-        # Load the world
-        self._load_environment()
-
-        # ---- Controller that the task can use ----
-        self.controller = WaypointController(
-            arm_id=int(self.right_arm["body"]),
-            ee_link=int(self.right_arm["eef"]),
-            arm_joints=[int(j) for j in self.right_arm["arm_joints"]],  # type: ignore[index]
-            dt=self.dt,
-            gripper_open=self.gripper_open,
-            gripper_close=self.gripper_close,
-        )
-
-    # ---------- scene transforms ----------
-    def _rotate_point(self, point: Tuple[float, float, float]) -> Tuple[float, float, float]:
-        if abs(self.world_yaw_rad) < 1e-8:
-            return point
-        x, y, z = point
-        rx = self._cos_yaw * x - self._sin_yaw * y
-        ry = self._sin_yaw * x + self._cos_yaw * y
-        return (rx, ry, z)
-
-    def _rotate_object_pose(self, pose: config.ObjectPose) -> config.ObjectPose:
-        position = self._rotate_point(pose.position)
-        roll, pitch, yaw = pose.orientation_rpy
-        return config.ObjectPose(position=position, orientation_rpy=(roll, pitch, yaw + self.world_yaw_rad))
-
-    def _rotate_pose6d(self, pose: config.Pose6D) -> config.Pose6D:
-        x, y, z = self._rotate_point((pose.x, pose.y, pose.z))
-        return config.Pose6D(x=x, y=y, z=z, roll=pose.roll, pitch=pose.pitch, yaw=pose.yaw + self.world_yaw_rad)
-
-    # ---------- world building ----------
-    def _load_environment(self) -> None:
-        p.loadURDF("plane.urdf", physicsClientId=self.client_id)
-
-        # Table (simple box + 4 legs)
-        table_height = config.TABLE_HEIGHT
-        table_thickness = 0.05
-        table_half_extents = [1.2, 0.9, table_thickness / 2.0]
-        top_height = table_height - table_thickness / 2.0
-
-        table_col_shape = p.createCollisionShape(p.GEOM_BOX, halfExtents=table_half_extents, physicsClientId=self.client_id)
-        table_visual_shape = p.createVisualShape(
-            shapeType=p.GEOM_BOX, halfExtents=table_half_extents, rgbaColor=[0.7, 0.6, 0.5, 1.0], physicsClientId=self.client_id
-        )
-        table_body = p.createMultiBody(
-            baseMass=0,
-            baseCollisionShapeIndex=table_col_shape,
-            baseVisualShapeIndex=table_visual_shape,
-            basePosition=[0, 0, top_height],
-            physicsClientId=self.client_id,
-        )
-        self.objects["table"] = LoadedObject(table_body, "table", config.ObjectPose((0, 0, table_height), (0, 0, 0)))
-
-        leg_half_extents = [0.05, 0.05, table_height / 2.0]
-        leg_positions = [
-            (table_half_extents[0] - leg_half_extents[0], table_half_extents[1] - leg_half_extents[1]),
-            (table_half_extents[0] - leg_half_extents[0], -(table_half_extents[1] - leg_half_extents[1])),
-            (-(table_half_extents[0] - leg_half_extents[0]), table_half_extents[1] - leg_half_extents[1]),
-            (-(table_half_extents[0] - leg_half_extents[0]), -(table_half_extents[1] - leg_half_extents[1])),
-        ]
-        leg_color = [0.4, 0.3, 0.2, 1.0]
-        leg_collision = p.createCollisionShape(p.GEOM_BOX, halfExtents=leg_half_extents, physicsClientId=self.client_id)
-        leg_visual = p.createVisualShape(p.GEOM_BOX, halfExtents=leg_half_extents, rgbaColor=leg_color, physicsClientId=self.client_id)
-        for idx, (px, py) in enumerate(leg_positions):
-            leg_body = p.createMultiBody(
-                baseMass=0,
-                baseCollisionShapeIndex=leg_collision,
-                baseVisualShapeIndex=leg_visual,
-                basePosition=[px, py, leg_half_extents[2]],
-                physicsClientId=self.client_id,
-            )
-            self.objects[f"table_leg_{idx}"] = LoadedObject(
-                leg_body, f"table_leg_{idx}", config.ObjectPose((px, py, leg_half_extents[2]), (0.0, 0.0, 0.0))
-            )
-
-        # From recipe config if present; otherwise spawn simple primitives
-        if self.recipe_config is not None:
-            self._spawn_recipe_objects(self.recipe_config)
-        else:
-            self._spawn_default_bowls()
-            self._spawn_default_pan()
-
-        # Quick-access ids
-        if "rice_bowl" in self.objects:
-            self.bowl_body = self.objects["rice_bowl"].body_id
-        if "pan" in self.objects:
-            self.pan_body = self.objects["pan"].body_id
-
-    def _spawn_default_bowls(self) -> None:
-        for name, pose in config.BOWL_POSES.items():
-            rotated = self._rotate_object_pose(pose)
-            col = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.07, height=0.05, physicsClientId=self.client_id)
-            vis = p.createVisualShape(
-                shapeType=p.GEOM_CYLINDER, radius=0.07, length=0.05, rgbaColor=[0.9, 0.9, 0.9, 1.0], physicsClientId=self.client_id
-            )
-            body = p.createMultiBody(
-                baseMass=0.1,
-                baseCollisionShapeIndex=col,
-                baseVisualShapeIndex=vis,
-                basePosition=list(rotated.position),
-                baseOrientation=p.getQuaternionFromEuler(rotated.orientation_rpy),
-                physicsClientId=self.client_id,
-            )
-            self.objects[f"bowl_{name}"] = LoadedObject(body, f"bowl_{name}", rotated)
-
-    def _spawn_default_pan(self) -> None:
-        pose = self._rotate_object_pose(config.PAN_POSE)
-        col = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.12, height=0.04, physicsClientId=self.client_id)
-        vis = p.createVisualShape(
-            shapeType=p.GEOM_CYLINDER, radius=0.12, length=0.04, rgbaColor=[0.2, 0.2, 0.2, 1.0], physicsClientId=self.client_id
-        )
-        body = p.createMultiBody(
-            baseMass=0.3,
-            baseCollisionShapeIndex=col,
-            baseVisualShapeIndex=vis,
-            basePosition=list(pose.position),
-            baseOrientation=p.getQuaternionFromEuler(pose.orientation_rpy),
-            physicsClientId=self.client_id,
-        )
-        self.objects["pan"] = LoadedObject(body, "pan", pose)
-
-    def _spawn_recipe_objects(self, recipe_cfg: config.PourTaskConfig) -> None:
-        # Rice bowl
-        bowl_pose = self._rotate_pose6d(recipe_cfg.bowl_pose)
-        bowl_body, bowl_props = create_rice_bowl(self.client_id, bowl_pose)
-        bowl_obj = LoadedObject(bowl_body, "rice_bowl", pose6d_to_object_pose(bowl_pose), properties=bowl_props)
-        self.objects["rice_bowl"] = bowl_obj
-        self.bowl_body = bowl_body
-
-        # Pan
-        pan_pose = self._rotate_pose6d(recipe_cfg.pan_pose)
-        pan_body, pan_props = create_pan(self.client_id, pan_pose)
-        pan_obj = LoadedObject(pan_body, "pan", pose6d_to_object_pose(pan_pose), properties=pan_props)
-        self.objects["pan"] = pan_obj
-        self.pan_body = pan_body
-
-    # ---------- simulation & particles ----------
-    def step_simulation(self, steps: int = 120) -> None:
-        for _ in range(steps):
-            p.stepSimulation(physicsClientId=self.client_id)
-            self.sim_time += self.dt
-
-    def spawn_rice_particles(self, count: int, radius: float = 0.005, seed: int = 7) -> ParticleSet:
-        bowl = self.objects.get("rice_bowl")
-        if bowl is None:
-            raise RuntimeError("Rice bowl object not available for particle spawning.")
-        bowl_radius = bowl.properties.get("inner_radius", bowl.properties.get("radius", 0.07))
-        bowl_height = bowl.properties.get("inner_height", bowl.properties.get("height", 0.05))
-        spawn_height = bowl.properties.get("spawn_height", 0.02)
-        self.particles = spawn_spheres(
+    def spawn_rice_particles(
+        self,
+        count: int,
+        radius: float = 0.005,
+        seed: int = 7,
+    ) -> Optional[ParticleSet]:
+        bowl_entry = self.objects.get("bowl")
+        if not bowl_entry:
+            LOGGER.warning("Cannot spawn particles before bowl is created")
+            return None
+        bowl_id = bowl_entry["body_id"]
+        position, orientation = p.getBasePositionAndOrientation(bowl_id, physicsClientId=self.client_id)
+        bowl_props = bowl_entry["properties"]
+        particle_set = spawn_spheres(
             client_id=self.client_id,
             count=count,
             radius=radius,
-            center=bowl.pose.position,
-            bowl_radius=bowl_radius,
-            bowl_height=bowl_height,
-            spawn_height=spawn_height,
+            center=position,
+            bowl_radius=bowl_props["inner_radius"],
+            bowl_height=bowl_props["inner_height"],
+            spawn_height=bowl_props["spawn_height"],
             seed=seed,
         )
-        return self.particles
+        self.particles = particle_set
+        LOGGER.info("Spawned %d rice particles (radius=%.4f)", particle_set.count, radius)
+        return particle_set
 
-    def count_particles_in_pan(self) -> Tuple[int, int, float]:
-        if self.particles is None:
-            return (0, 0, 0.0)
-        pan = self.objects.get("pan")
-        if pan is None:
-            return (self.particles.count, 0, 0.0)
-        center = pan.pose.position
-        inner_radius = pan.properties.get("inner_radius", 0.14)
-        base_height = pan.properties.get("base_height", center[2])
-        lip_height = pan.properties.get("lip_height", center[2] + 0.05)
-        return self.particles.count_in_pan(
+    def count_particles_in_pan(self) -> Dict[str, float]:
+        pan_entry = self.objects.get("pan")
+        if not pan_entry or not self.particles:
+            return {"total": 0, "in_pan": 0, "transfer_ratio": 0.0}
+        pan_id = pan_entry["body_id"]
+        center, _ = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.client_id)
+        props = pan_entry["properties"]
+        total, inside, ratio = self.particles.count_in_pan(
             client_id=self.client_id,
             center=center,
-            inner_radius=inner_radius,
-            base_height=base_height,
-            lip_height=lip_height,
+            inner_radius=props["inner_radius"],
+            base_height=props["base_height"],
+            lip_height=props["lip_height"],
         )
-
-    # ---------- gripper hooks used by WaypointController ----------
-    def gripper_open(self, width: float = 0.08) -> None:
-        self.robots.open_gripper(self.right_arm, width=width)
-
-    def gripper_close(self, force: float = 60.0) -> None:
-        self.robots.close_gripper(self.right_arm, force=force)
+        return {"total": total, "in_pan": inside, "transfer_ratio": ratio}
 
     def disconnect(self) -> None:
-        p.disconnect(self.client_id)
+        if p.isConnected(self.client_id):
+            p.disconnect(self.client_id)
+
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+
+    def _get_arm(self, arm: Optional[str]) -> ArmState:
+        arm_name = arm or self._active_arm_name
+        if arm_name == "left":
+            return self.left_arm
+        if arm_name == "right":
+            return self.right_arm
+        raise ValueError(f"Unknown arm '{arm_name}'")
+
+    def _apply_world_yaw(self, pose: Pose6D) -> Pose6D:
+        yaw = math.radians(self.recipe.scene.world_yaw_deg)
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        x = pose.x * cos_y - pose.y * sin_y
+        y = pose.x * sin_y + pose.y * cos_y
+        return Pose6D(
+            x=x,
+            y=y,
+            z=pose.z,
+            roll=pose.roll,
+            pitch=pose.pitch,
+            yaw=pose.yaw + yaw,
+        )
 
 
-# ------------ helper used by StirFry action -------------
-def interpolate_circle(center: Tuple[float, float, float], radius: float, angle: float) -> Tuple[float, float, float]:
-    """Return a point on a horizontal circle (z stays constant)."""
-    x = center[0] + radius * math.cos(angle)
-    y = center[1] + radius * math.sin(angle)
-    return (x, y, center[2])
+__all__ = ["RobotChefSimulation", "ArmState"]
