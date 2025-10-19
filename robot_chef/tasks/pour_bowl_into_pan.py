@@ -122,11 +122,21 @@ class PourBowlIntoPanAndReturn:
         if cfg.particles > 0:
             sim.spawn_rice_particles(cfg.particles, seed=cfg.seed)
         bowl_obj = sim.objects.get("bowl")
-        print('bowl_obj:', bowl_obj)
         if bowl_obj is None:
             raise RuntimeError("bowl not found in sim.objects; available keys: "
                             + ", ".join(sim.objects.keys()))
         self._bowl_uid = bowl_obj['body_id']
+        
+        pan_obj = sim.objects.get("pan")
+        if pan_obj is None:
+            raise RuntimeError("pan_obj not found in sim.objects; available keys: " + ", ".join(sim.objects.keys()))
+        self._pan_uid = pan_obj['body_id']
+        
+        stove_obj = sim.objects.get("stove_block")
+        if stove_obj is None:
+            raise RuntimeError("stove_obj not found in sim.objects; available keys: " + ", ".join(sim.objects.keys()))
+        self._stove_block_uid = stove_obj['body_id']
+        
 
     def plan(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
         # The dynamic plan depends on perception; defer heavy lifting to execute().
