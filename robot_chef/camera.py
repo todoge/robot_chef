@@ -1,14 +1,4 @@
-"""RGB-D camera utilities for the Robot Chef simulation.
-
-This camera supports both:
-  1) Free (world-placed) viewing
-  2) Wrist-mounted viewing: the camera extrinsics are recomputed from the
-     parent link state on every get_rgbd() call so it follows the arm.
-
-Coordinate convention:
-- The camera looks along its local -Z axis.
-- The camera's "up" is its local +Y axis.
-"""
+"""RGB-D camera abstraction with wrist-mount support and reliable extrinsics."""
 
 from __future__ import annotations
 
@@ -23,17 +13,49 @@ import pybullet as p
 LOGGER = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Small linear algebra helpers
+@dataclass
+class CameraNoiseModel:
+    depth_std: float = 0.0
+    drop_prob: float = 0.0
 
-def _rpy_deg_to_quat(rpy_deg: Sequence[float]) -> Tuple[float, float, float, float]:
-    roll, pitch, yaw = (math.radians(rpy_deg[0]),
-                        math.radians(rpy_deg[1]),
-                        math.radians(rpy_deg[2]))
-    return p.getQuaternionFromEuler([roll, pitch, yaw])
 
-def _quat_to_R(quat: Sequence[float]) -> np.ndarray:
-    return np.array(p.getMatrixFromQuaternion(quat), dtype=float).reshape(3, 3)
+def _rotation_from_euler(rpy_deg: Sequence[float]) -> np.ndarray:
+    roll, pitch, yaw = [math.radians(v) for v in rpy_deg]
+    return np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler([roll, pitch, yaw])), dtype=float).reshape(3, 3)
+
+
+def _quaternion_from_matrix(R: np.ndarray) -> Tuple[float, float, float, float]:
+    m = R
+    trace = float(m[0, 0] + m[1, 1] + m[2, 2])
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * s
+        x = (m[2, 1] - m[1, 2]) / s
+        y = (m[0, 2] - m[2, 0]) / s
+        z = (m[1, 0] - m[0, 1]) / s
+    else:
+        if m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+            w = (m[2, 1] - m[1, 2]) / s
+            x = 0.25 * s
+            y = (m[0, 1] + m[1, 0]) / s
+            z = (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+            w = (m[0, 2] - m[2, 0]) / s
+            x = (m[0, 1] + m[1, 0]) / s
+            y = 0.25 * s
+            z = (m[1, 2] + m[2, 1]) / s
+        else:
+            s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+            w = (m[1, 0] - m[0, 1]) / s
+            x = (m[0, 2] + m[2, 0]) / s
+            y = (m[1, 2] + m[2, 1]) / s
+            z = 0.25 * s
+    quat = np.array([x, y, z, w], dtype=float)
+    quat /= np.linalg.norm(quat)
+    return tuple(float(v) for v in quat)
+
 
 def _make_T(R: np.ndarray, t: Sequence[float]) -> np.ndarray:
     T = np.eye(4, dtype=float)
@@ -41,271 +63,245 @@ def _make_T(R: np.ndarray, t: Sequence[float]) -> np.ndarray:
     T[:3, 3] = np.asarray(t, dtype=float)
     return T
 
-def _invert_T(T: np.ndarray) -> np.ndarray:
-    R = T[:3, :3]
-    Rt = R.T
-    t = T[:3, 3]
-    Ti = np.eye(4, dtype=float)
-    Ti[:3, :3] = Rt
-    Ti[:3, 3] = -Rt @ t
-    return Ti
-
-
-# --------------------------------------------------------------------------- #
-# API
-
-@dataclass
-class CameraNoiseModel:
-    depth_std: float = 0.0   # meters (Gaussian)
-    drop_prob: float = 0.0   # probability of dropping a depth pixel (set to 0)
 
 class Camera:
-    """Thin wrapper around PyBullet's virtual camera with intrinsic bookkeeping."""
+    """Wrapper over PyBullet's virtual camera that keeps consistent CV extrinsics."""
 
     def __init__(
         self,
         client_id: int,
         *,
-        # World placement (used only when not mounted)
+        fov_deg: float,
+        near: float,
+        far: float,
+        resolution: Tuple[int, int],
+        noise: Optional[CameraNoiseModel] = None,
         view_xyz: Sequence[float] = (0.0, 0.0, 1.0),
         view_rpy_deg: Sequence[float] = (0.0, -45.0, 0.0),
-        fov_deg: float = 60.0,
-        near: float = 0.05,
-        far: float = 5.0,
-        resolution: Tuple[int, int] = (640, 480),
-        noise: Optional[CameraNoiseModel] = None,
     ) -> None:
         self.client_id = int(client_id)
         self._width, self._height = int(resolution[0]), int(resolution[1])
         self._fov_deg = float(fov_deg)
-        self._near, self._far = float(near), float(far)
+        self._near = float(near)
+        self._far = float(far)
         self._noise = noise or CameraNoiseModel()
 
-        # --- Intrinsics
-        self._K = self._compute_intrinsics(self._fov_deg, self._width, self._height)
+        # Intrinsic matrix (pinhole, origin at top-left, y downward)
+        f = (self._height / 2.0) / math.tan(math.radians(self._fov_deg) / 2.0)
+        cx = (self._width - 1) / 2.0
+        cy = (self._height - 1) / 2.0
+        self._intrinsics = np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]], dtype=float)
 
-        # --- World (free) placement defaults
-        self._world_pos = np.array(view_xyz, dtype=float)
-        self._world_quat = _rpy_deg_to_quat(view_rpy_deg)
+        # Free-camera pose (used when not mounted)
+        self._world_position = np.array(view_xyz, dtype=float)
+        self._world_rotation = _rotation_from_euler(view_rpy_deg)  # maps camera frame -> world
 
-        # --- Mount state (None if not mounted)
+        # Mount configuration
         self._mounted = False
         self._parent_body: Optional[int] = None
         self._parent_link: Optional[int] = None
-        self._rel_R = np.eye(3, dtype=float)   # link->cam rotation
-        self._rel_t = np.array([0.0, 0.0, 0.0], dtype=float)  # link->cam translation
+        self._rel_translation = np.zeros(3, dtype=float)
+        self._rel_rotation = np.eye(3, dtype=float)
 
-        # Buffers for extrinsics
-        self._T_world_cam = np.eye(4, dtype=float)
-        self._T_cam_world = np.eye(4, dtype=float)
-        self._update_extrinsics_world()
+        # Extrinsic caches (OpenGL frame and CV frame)
+        self._T_world_cam_gl = np.eye(4, dtype=float)
+        self._T_cam_world_gl = np.eye(4, dtype=float)
+        self._T_world_cam_cv = np.eye(4, dtype=float)
+        self._T_cam_world_cv = np.eye(4, dtype=float)
 
-        # Projection matrix (depends only on intrinsics + near/far)
-        self._update_projection()
+        self._update_from_free_pose()
 
     # ------------------------------------------------------------------ #
-    # Mounting / Aiming
+    # Mounting / configuration
 
     def mount_to_link(
         self,
         *,
         parent_body_id: int,
         parent_link_id: int,
-        rel_xyz: Sequence[float] = (0.05, 0.0, 0.10),
-        rel_rpy_deg: Sequence[float] = (0.0, -55.0, 0.0),
+        rel_xyz: Sequence[float],
+        rel_rpy_deg: Sequence[float],
     ) -> None:
-        """Attach camera to a robot link. Camera looks along -Z."""
+        """Attach camera rigidly to a robot link."""
         self._parent_body = int(parent_body_id)
         self._parent_link = int(parent_link_id)
-        self._rel_t = np.asarray(rel_xyz, dtype=float)
-        self._rel_R = _quat_to_R(_rpy_deg_to_quat(rel_rpy_deg))
+        self._rel_translation = np.asarray(rel_xyz, dtype=float)
+        self._rel_rotation = _rotation_from_euler(rel_rpy_deg)
         self._mounted = True
-        # Compute initial extrinsics from current link pose
-        self._update_extrinsics_from_mount()
+        self._update_from_mount()
         LOGGER.info(
-            "Camera mounted to body=%d link=%d with rel (xyz=%s, rpy_deg=%s)",
-            self._parent_body, self._parent_link,
-            np.array(self._rel_t), np.degrees(np.array([0.0, 0.0, 0.0])) if False else np.array(rel_rpy_deg)
+            "Camera mounted to body=%d link=%d with rel xyz=%s rpy_deg=%s",
+            self._parent_body,
+            self._parent_link,
+            np.array(rel_xyz, dtype=float),
+            np.array(rel_rpy_deg, dtype=float),
         )
 
     def aim_at_world(self, target_xyz: Sequence[float]) -> None:
-        """Rotate ONLY the relative mount so -Z_cam points at target_xyz."""
+        """Rotate the relative mount so the camera optical axis (+Z) points at the target."""
         if not self._mounted:
-            # For free camera, just set world rotation to look at target
-            self._look_at_free(target_xyz)
+            self._update_free_orientation(target_xyz)
             return
-        # Get current link world pose
+
+        assert self._parent_body is not None and self._parent_link is not None
         ls = p.getLinkState(
-            self._parent_body, self._parent_link,
+            self._parent_body,
+            self._parent_link,
             computeForwardKinematics=True,
             physicsClientId=self.client_id,
         )
-        link_pos = np.array(ls[4], dtype=float)
-        link_quat = np.array(ls[5], dtype=float)
-        R_link = _quat_to_R(link_quat)
+        link_pos = np.asarray(ls[4], dtype=float)
+        link_rot = np.array(p.getMatrixFromQuaternion(ls[5]), dtype=float).reshape(3, 3)
 
-        # Current cam world position with existing rel transform
-        cam_pos = link_pos + R_link @ self._rel_t
-        to_tgt = np.asarray(target_xyz, dtype=float) - cam_pos
-        n = np.linalg.norm(to_tgt)
-        if n < 1e-8:
+        cam_pos = link_pos + link_rot @ self._rel_translation
+        forward = np.asarray(target_xyz, dtype=float) - cam_pos
+        norm = np.linalg.norm(forward)
+        if norm < 1e-6:
             return
-        to_tgt /= n
+        forward /= norm
 
-        # Build camera frame with -Z along to_tgt and +Y roughly upright
-        z_cam = -to_tgt
-        up_guess = np.array([0.0, 1.0, 0.0])
-        x_cam = np.cross(up_guess, z_cam)
+        up_hint = np.array([0.0, 0.0, 1.0], dtype=float)
+        if abs(np.dot(forward, up_hint)) > 0.95:
+            up_hint = np.array([0.0, 1.0, 0.0], dtype=float)
+
+        z_cam = forward  # +Z forward
+        x_cam = np.cross(up_hint, z_cam)
         if np.linalg.norm(x_cam) < 1e-6:
-            up_guess = np.array([1.0, 0.0, 0.0])
-            x_cam = np.cross(up_guess, z_cam)
+            x_cam = np.cross(np.array([1.0, 0.0, 0.0], dtype=float), z_cam)
         x_cam /= np.linalg.norm(x_cam)
         y_cam = np.cross(z_cam, x_cam)
-        R_world_cam_des = np.column_stack([x_cam, y_cam, z_cam])
-        # Convert to new relative rotation: R_rel = R_link^T * R_world_cam
-        self._rel_R = R_link.T @ R_world_cam_des
-        self._update_extrinsics_from_mount()
+        R_world_cam = np.column_stack([x_cam, y_cam, z_cam])
+        self._rel_rotation = link_rot.T @ R_world_cam
+        self._update_from_mount()
 
     # ------------------------------------------------------------------ #
     # Capture
 
-    def get_rgbd(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return (rgb, depth_meters, K). Recomputes extrinsics if mounted."""
+    def get_rgbd(self, with_segmentation: bool = False):
+        """Return RGB, depth (meters), intrinsics, and optional segmentation mask."""
         if self._mounted:
-            self._update_extrinsics_from_mount()
+            self._update_from_mount()
+        else:
+            self._update_from_free_pose()
 
-        # Build a proper OpenGL view matrix from world_from_camera
-        eye = self._T_world_cam[:3, 3]
-        Rwc = self._T_world_cam[:3, :3]
-        forward = Rwc @ np.array([0.0, 0.0, -1.0])   # camera looks along -Z
-        up = Rwc @ np.array([0.0, 1.0,  0.0])        # +Y is camera up
+        eye = self._T_world_cam_gl[:3, 3]
+        R_wc = self._T_world_cam_gl[:3, :3]
+        forward = R_wc[:, 2]  # +Z forward
+        up = R_wc[:, 1]
         target = eye + forward
 
-        view = p.computeViewMatrix(
-            cameraEyePosition=eye.tolist(),
-            cameraTargetPosition=target.tolist(),
-            cameraUpVector=up.tolist(),
-        )
-
-        # Projection straight from FOV (PyBullet handles layout)
-        proj = p.computeProjectionMatrixFOV(
-            fov=self._fov_deg,
-            aspect=self._width / float(self._height),
-            nearVal=self._near,
-            farVal=self._far,
-        )
-
+        flags = p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX if with_segmentation else 0
         img = p.getCameraImage(
             self._width,
             self._height,
-            viewMatrix=view,
-            projectionMatrix=proj,
+            viewMatrix=p.computeViewMatrix(eye, target, up),
+            projectionMatrix=p.computeProjectionMatrixFOV(
+                fov=self._fov_deg,
+                aspect=self._width / float(self._height),
+                nearVal=self._near,
+                farVal=self._far,
+            ),
             renderer=p.ER_BULLET_HARDWARE_OPENGL,
+            flags=flags,
             physicsClientId=self.client_id,
         )
 
-        # RGBA -> RGB
-        rgb = np.reshape(np.asarray(img[2], dtype=np.uint8), (self._height, self._width, 4))[..., :3].copy()
+        rgba = np.reshape(np.asarray(img[2], dtype=np.uint8), (self._height, self._width, 4))
+        rgb = rgba[..., :3].copy()
 
-        # Depth buffer -> meters
         depth_buf = np.reshape(np.asarray(img[3], dtype=np.float32), (self._height, self._width))
         depth = self._depth_buffer_to_meters(depth_buf)
 
-        # Optional noise
         if self._noise.depth_std > 0.0:
             depth = depth + np.random.normal(0.0, self._noise.depth_std, depth.shape).astype(np.float32)
         if self._noise.drop_prob > 0.0:
-            mask = np.random.random(size=depth.shape) < float(self._noise.drop_prob)
+            drop = np.random.rand(*depth.shape) < float(self._noise.drop_prob)
             depth = depth.copy()
-            depth[mask] = 0.0
+            depth[drop] = 0.0
 
-        return rgb, depth.astype(np.float32), self._K.copy()
+        seg_mask = None
+        if with_segmentation:
+            seg_mask = np.reshape(np.asarray(img[4], dtype=np.int32), (self._height, self._width))
+
+        return rgb, depth.astype(np.float32), self._intrinsics.copy(), seg_mask
+
     # ------------------------------------------------------------------ #
-    # Properties
+    # Accessors
 
     @property
     def intrinsics(self) -> np.ndarray:
-        return self._K.copy()
+        return self._intrinsics.copy()
 
     @property
     def world_from_camera(self) -> np.ndarray:
-        return self._T_world_cam.copy()
+        """4x4 transform from camera CV frame (+X right, +Y down, +Z forward) to world."""
+        return self._T_world_cam_cv.copy()
 
     @property
     def camera_from_world(self) -> np.ndarray:
-        return self._T_cam_world.copy()
+        """4x4 transform from world to camera CV frame."""
+        return self._T_cam_world_cv.copy()
+
+    @property
+    def pose_world(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return camera position and quaternion in world coordinates (OpenGL frame)."""
+        pos = self._T_world_cam_gl[:3, 3].copy()
+        quat = _quaternion_from_matrix(self._T_world_cam_gl[:3, :3])
+        return pos, np.asarray(quat, dtype=float)
 
     # ------------------------------------------------------------------ #
-    # Internals
+    # Internal helpers
 
-    def _look_at_free(self, target_xyz: Sequence[float]) -> None:
-        eye = np.array(self._world_pos, dtype=float)
-        tgt = np.asarray(target_xyz, dtype=float)
-        fwd = tgt - eye
-        n = np.linalg.norm(fwd)
-        if n < 1e-8:
+    def _update_free_orientation(self, target_xyz: Sequence[float]) -> None:
+        eye = self._world_position
+        forward = np.asarray(target_xyz, dtype=float) - eye
+        norm = np.linalg.norm(forward)
+        if norm < 1e-6:
             return
-        fwd /= n
-        z_cam = -fwd
-        up_guess = np.array([0.0, 1.0, 0.0])
-        x_cam = np.cross(up_guess, z_cam)
-        if np.linalg.norm(x_cam) < 1e-6:
-            up_guess = np.array([1.0, 0.0, 0.0])
-            x_cam = np.cross(up_guess, z_cam)
+        forward /= norm
+        up_hint = np.array([0.0, 0.0, 1.0], dtype=float)
+        if abs(np.dot(forward, up_hint)) > 0.95:
+            up_hint = np.array([0.0, 1.0, 0.0], dtype=float)
+        z_cam = forward
+        x_cam = np.cross(up_hint, z_cam)
         x_cam /= np.linalg.norm(x_cam)
         y_cam = np.cross(z_cam, x_cam)
-        R_world_cam = np.column_stack([x_cam, y_cam, z_cam])
-        self._T_world_cam = _make_T(R_world_cam, eye)
-        self._T_cam_world = _invert_T(self._T_world_cam)
+        self._world_rotation = np.column_stack([x_cam, y_cam, z_cam])
+        self._update_from_free_pose()
 
-    def _update_extrinsics_from_mount(self) -> None:
-        """Compute world_from_camera from current link state + relative mount."""
+    def _update_from_mount(self) -> None:
         assert self._parent_body is not None and self._parent_link is not None
         ls = p.getLinkState(
-            self._parent_body, self._parent_link,
+            self._parent_body,
+            self._parent_link,
             computeForwardKinematics=True,
             physicsClientId=self.client_id,
         )
-        link_pos = np.array(ls[4], dtype=float)  # worldLinkFramePosition
-        link_quat = np.array(ls[5], dtype=float) # worldLinkFrameOrientation
-        R_link = _quat_to_R(link_quat)
-        t_link = link_pos
+        link_pos = np.asarray(ls[4], dtype=float)
+        link_rot = np.array(p.getMatrixFromQuaternion(ls[5]), dtype=float).reshape(3, 3)
+        R_wc = link_rot @ self._rel_rotation
+        t_wc = link_pos + link_rot @ self._rel_translation
+        self._update_matrices(R_wc, t_wc)
 
-        # T_world_cam = T_world_link * T_link_cam
-        T_world_link = _make_T(R_link, t_link)
-        T_link_cam = _make_T(self._rel_R, self._rel_t)
-        self._T_world_cam = T_world_link @ T_link_cam
-        self._T_cam_world = _invert_T(self._T_world_cam)
+    def _update_from_free_pose(self) -> None:
+        self._update_matrices(self._world_rotation, self._world_position)
 
-    def _update_extrinsics_world(self) -> None:
-        """Use free (non-mounted) world pose."""
-        R_world = _quat_to_R(self._world_quat)
-        self._T_world_cam = _make_T(R_world, self._world_pos)
-        self._T_cam_world = _invert_T(self._T_world_cam)
+    def _update_matrices(self, R_wc: np.ndarray, t_wc: np.ndarray) -> None:
+        self._T_world_cam_gl = _make_T(R_wc, t_wc)
+        self._T_cam_world_gl = np.linalg.inv(self._T_world_cam_gl)
+        self._update_cv_frames()
 
-    def _update_projection(self) -> None:
-        # Build a true OpenGL-style projection that matches our intrinsics.
-        aspect = self._width / float(self._height)
-        proj = p.computeProjectionMatrixFOV(
-            fov=self._fov_deg,
-            aspect=aspect,
-            nearVal=self._near,
-            farVal=self._far,
-        )
-        self._projection_matrix = np.asarray(proj, dtype=float).reshape(4, 4)
-
-    @staticmethod
-    def _compute_intrinsics(fov_deg: float, width: int, height: int) -> np.ndarray:
-        fov_rad = math.radians(fov_deg)
-        fy = (height / 2.0) / math.tan(fov_rad / 2.0)
-        fx = fy * (width / height)
-        cx = (width - 1) / 2.0
-        cy = (height - 1) / 2.0
-        return np.array([[fx, 0.0, cx],
-                         [0.0, fy, cy],
-                         [0.0, 0.0, 1.0]], dtype=float)
+    def _update_cv_frames(self) -> None:
+        # Convert OpenGL camera frame (x right, y up, z forward) to CV convention (x right, y down, z forward)
+        T_gl_to_cv = np.eye(4, dtype=float)
+        T_gl_to_cv[1, 1] = -1.0
+        T_cv_to_gl = T_gl_to_cv
+        self._T_cam_world_cv = T_gl_to_cv @ self._T_cam_world_gl
+        self._T_world_cam_cv = self._T_world_cam_gl @ T_cv_to_gl
 
     def _depth_buffer_to_meters(self, depth_buffer: np.ndarray) -> np.ndarray:
         n, f = self._near, self._far
-        # Standard OpenGL depth deprojection
         return (2.0 * n * f) / (f + n - (2.0 * depth_buffer - 1.0) * (f - n))
+
+
+__all__ = ["Camera", "CameraNoiseModel"]

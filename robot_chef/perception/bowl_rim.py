@@ -1,20 +1,16 @@
-"""Bowl rim detection utilities."""
+"""Robust bowl rim detection using depth, segmentation, and analytic fallback."""
 
 from __future__ import annotations
 
-import logging
 import math
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pybullet as p
 
-LOGGER = logging.getLogger(__name__)
 
-
-def _matrix_to_quaternion(matrix: np.ndarray) -> Tuple[float, float, float, float]:
-    m = matrix
+def _matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, float]:
+    m = R
     trace = float(m[0, 0] + m[1, 1] + m[2, 2])
     if trace > 0.0:
         s = math.sqrt(trace + 1.0) * 2.0
@@ -46,13 +42,38 @@ def _matrix_to_quaternion(matrix: np.ndarray) -> Tuple[float, float, float, floa
     return tuple(float(v) for v in quat)
 
 
-def _project_points(world_points: np.ndarray, camera_from_world: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    hom = np.concatenate([world_points, np.ones((world_points.shape[0], 1), dtype=float)], axis=1)
-    cam = (camera_from_world @ hom.T).T
-    z = cam[:, 2:3]
-    z[z == 0.0] = 1e-6
-    pixels = (cam[:, :2] / z) @ K[:2, :2].T + K[:2, 2]
-    return pixels, cam[:, 2]
+def _project_points(world_pts: np.ndarray, camera_from_world: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    pts_h = np.concatenate([world_pts, np.ones((world_pts.shape[0], 1), dtype=float)], axis=1)
+    cam_pts = (camera_from_world @ pts_h.T).T
+    Z = cam_pts[:, 2]
+    if np.any(Z <= 1e-6):
+        return None, None
+    x = cam_pts[:, 0] / Z
+    y = cam_pts[:, 1] / Z
+    u = K[0, 0] * x + K[0, 2]
+    v = K[1, 1] * y + K[1, 2]
+    uv = np.stack([u, v], axis=1)
+    return uv, Z
+
+
+def _analytic_rim(bowl_pose, bowl_props) -> Tuple[np.ndarray, np.ndarray, float]:
+    inner_radius = float(bowl_props.get("inner_radius", 0.07))
+    inner_height = float(bowl_props.get("inner_height", 0.05))
+    pos = np.array([bowl_pose.x, bowl_pose.y, bowl_pose.z], dtype=float)
+    quat = p.getQuaternionFromEuler(bowl_pose.orientation_rpy)
+    R_wb = np.array(p.getMatrixFromQuaternion(quat), dtype=float).reshape(3, 3)
+    angles = np.linspace(0.0, 2.0 * math.pi, 360, endpoint=False)
+    circle_local = np.stack(
+        [
+            inner_radius * np.cos(angles),
+            inner_radius * np.sin(angles),
+            np.full_like(angles, inner_height),
+        ],
+        axis=1,
+    )
+    rim_world = (R_wb @ circle_local.T).T + pos
+    center_world = pos + R_wb @ np.array([0.0, 0.0, inner_height], dtype=float)
+    return rim_world, center_world, inner_radius
 
 
 def detect_bowl_rim(
@@ -62,173 +83,148 @@ def detect_bowl_rim(
     seg: Optional[Dict[str, object]] = None,
     bowl_uid: Optional[int] = None,
 ) -> Dict[str, object]:
-    """Detect the rim of the bowl via simple geometric projection and circle fitting."""
     if seg is None:
-        seg = {}
-    client_id = int(seg.get("client_id", 0))
-    camera_from_world = np.asarray(seg.get("camera_from_world", np.eye(4)), dtype=float)
-    world_from_camera = np.asarray(seg.get("world_from_camera", np.eye(4)), dtype=float)
+        raise ValueError("seg dictionary must be provided")
+    if bowl_uid is None:
+        raise ValueError("bowl_uid must be provided")
+
+    camera_from_world = np.asarray(seg["camera_from_world"], dtype=float)
+    world_from_camera = np.asarray(seg["world_from_camera"], dtype=float)
     perception_cfg = seg.get("perception_cfg", None)
     bowl_props = seg.get("bowl_properties", {})
-    roi_margin_m = float(getattr(perception_cfg, "bowl_roi_margin_m", 0.12) if perception_cfg else 0.12)
-    rim_thickness = float(getattr(perception_cfg, "rim_thickness_m", 0.006) if perception_cfg else 0.006)
-    sample_count = int(getattr(perception_cfg, "rim_sample_count", 24) if perception_cfg else 24)
+    bowl_pose = seg.get("bowl_pose", None)
+    if bowl_pose is None:
+        raise ValueError("seg must include 'bowl_pose'")
+    seg_mask = seg.get("segmentation", None)
 
-    if bowl_uid is None:
-        raise ValueError("detect_bowl_rim requires bowl_uid for projection guidance")
-
-    bowl_pos, bowl_quat = p.getBasePositionAndOrientation(bowl_uid, physicsClientId=client_id)
-    bowl_pos = np.asarray(bowl_pos, dtype=float)
-    bowl_rot = np.array(p.getMatrixFromQuaternion(bowl_quat), dtype=float).reshape(3, 3)
-
-    radius = float(bowl_props.get("inner_radius", 0.07))
+    inner_radius = float(bowl_props.get("inner_radius", 0.07))
     inner_height = float(bowl_props.get("inner_height", 0.05))
-    rim_height_world = bowl_pos[2] + inner_height
+    rim_thickness = float(getattr(perception_cfg, "rim_thickness_m", 0.006) if perception_cfg else 0.006)
 
-    # Estimate bounding box by projecting analytic rim samples.
-    angles = np.linspace(0.0, 2.0 * math.pi, num=64, endpoint=False)
-    rim_samples_local = np.stack(
-        [
-            radius * np.cos(angles),
-            radius * np.sin(angles),
-            np.full_like(angles, inner_height),
-        ],
-        axis=1,
-    )
-    rim_samples_world = (bowl_rot @ rim_samples_local.T).T + bowl_pos
-    px, depths = _project_points(rim_samples_world, camera_from_world, K)
-    valid = depths > 0.0
-    if not np.any(valid):
-        raise RuntimeError("No rim projections fell within the camera view frustum")
-    px = px[valid]
-    min_px = np.floor(np.min(px, axis=0)).astype(int)
-    max_px = np.ceil(np.max(px, axis=0)).astype(int)
-    depth_guess = float(np.mean(depths[valid]))
-    margin_px = int(max(5, roi_margin_m * K[0, 0] / max(depth_guess, 1e-3)))
+    rim_points_world: Optional[np.ndarray] = None
+    center_world: Optional[np.ndarray] = None
+    radius_est: float = inner_radius
 
-    height, width = depth.shape
-    u0 = max(0, min_px[0] - margin_px)
-    u1 = min(width - 1, max_px[0] + margin_px)
-    v0 = max(0, min_px[1] - margin_px)
-    v1 = min(height - 1, max_px[1] + margin_px)
-    if u0 >= u1 or v0 >= v1:
-        u0, v0, u1, v1 = 0, 0, width - 1, height - 1
+    # ------------------------------------------------------------------ #
+    # Use segmentation + depth if available
+    if seg_mask is not None:
+        obj_ids = seg_mask.astype(np.int32) & ((1 << 24) - 1)
+        bowl_pixels = obj_ids == int(bowl_uid)
+        bowl_pixels &= depth > 0.0
+        if np.count_nonzero(bowl_pixels) > 80:
+            v_idx, u_idx = np.nonzero(bowl_pixels)
+            z = depth[v_idx, u_idx]
+            fx, fy = float(K[0, 0]), float(K[1, 1])
+            cx, cy = float(K[0, 2]), float(K[1, 2])
+            x = (u_idx - cx) * z / fx
+            y = (v_idx - cy) * z / fy
+            pts_cam = np.stack([x, y, z], axis=1)
+            pts_cam_h = np.concatenate([pts_cam, np.ones((pts_cam.shape[0], 1), dtype=float)], axis=1)
+            pts_world = (world_from_camera @ pts_cam_h.T).T[:, :3]
 
-    ys = np.arange(v0, v1 + 1)
-    xs = np.arange(u0, u1 + 1)
-    xv, yv = np.meshgrid(xs, ys)
-    depth_roi = depth[v0 : v1 + 1, u0 : u1 + 1]
-    valid_depth = depth_roi > 0.0
-    if not np.any(valid_depth):
-        LOGGER.warning("Depth ROI is empty, falling back to analytic rim samples")
-        points_world = rim_samples_world.copy()
-    else:
-        u = xv[valid_depth].astype(float)
-        v = yv[valid_depth].astype(float)
-        z = depth_roi[valid_depth].astype(float)
-        x = (u - K[0, 2]) * z / K[0, 0]
-        y = (v - K[1, 2]) * z / K[1, 1]
-        cam_pts = np.stack([x, y, z, np.ones_like(z)], axis=1)
-        world_pts = (world_from_camera @ cam_pts.T).T[:, :3]
-        points_local = (bowl_rot.T @ (world_pts - bowl_pos).T).T
-        rim_band = np.abs(points_local[:, 2] - inner_height) <= max(0.01, rim_thickness * 2.0)
-        radial = np.linalg.norm(points_local[:, :2], axis=1)
-        radial_band = np.abs(radial - radius) <= max(0.01, rim_thickness * 3.0)
-        filtered = world_pts[rim_band & radial_band]
-        if filtered.shape[0] < 50:
-            LOGGER.info("Insufficient rim hits (%d), augmenting with analytic samples", filtered.shape[0])
-            points_world = np.concatenate([filtered, rim_samples_world], axis=0)
-        else:
-            points_world = filtered
+            bowl_pos = np.array([bowl_pose.x, bowl_pose.y, bowl_pose.z], dtype=float)
+            R_wb = np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler(bowl_pose.orientation_rpy)), dtype=float).reshape(3, 3)
+            R_bw = R_wb.T
+            pts_local = (R_bw @ (pts_world - bowl_pos).T).T
 
-    # Ensure dense sampling >= 200 points by interpolation along the rim.
-    if points_world.shape[0] < 200:
-        extra_angles = np.linspace(0.0, 2.0 * math.pi, num=200, endpoint=False)
-        dense_samples = (bowl_rot @ np.stack(
+            height_tol = max(0.015, rim_thickness * 3.0)
+            radius_tol = max(0.02, rim_thickness * 6.0)
+            radial = np.linalg.norm(pts_local[:, :2], axis=1)
+            mask = (np.abs(pts_local[:, 2] - inner_height) <= height_tol) & (np.abs(radial - inner_radius) <= radius_tol)
+            rim_local = pts_local[mask]
+
+            if rim_local.shape[0] >= 40:
+                XY = rim_local[:, :2]
+                A = np.column_stack([2.0 * XY[:, 0], 2.0 * XY[:, 1], np.ones(XY.shape[0])])
+                b_vec = np.sum(XY ** 2, axis=1)
+                sol, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+                cx_local, cy_local, c = sol
+                radius_est = math.sqrt(max(cx_local * cx_local + cy_local * cy_local + c, 1e-6))
+                center_local = np.array([cx_local, cy_local, inner_height], dtype=float)
+                angles = np.linspace(0.0, 2.0 * math.pi, 360, endpoint=False)
+                circle_local = np.stack(
+                    [
+                        radius_est * np.cos(angles),
+                        radius_est * np.sin(angles),
+                        np.full_like(angles, inner_height),
+                    ],
+                    axis=1,
+                )
+                rim_points_world = (R_wb @ circle_local.T).T + bowl_pos
+                center_world = bowl_pos + R_wb @ center_local
+
+    if rim_points_world is None or center_world is None:
+        rim_points_world, center_world, radius_est = _analytic_rim(bowl_pose, bowl_props)
+
+    # ------------------------------------------------------------------ #
+    # Feature points for IBVS (two opposite rim points)
+    feature_angles = [0.0, math.pi]
+    R_wb = np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler(bowl_pose.orientation_rpy)), dtype=float).reshape(3, 3)
+    features_world = []
+    for ang in feature_angles:
+        local = np.array(
             [
-                radius * np.cos(extra_angles),
-                radius * np.sin(extra_angles),
-                np.full_like(extra_angles, inner_height),
-            ],
-            axis=1,
-        ).T).T + bowl_pos
-        points_world = np.concatenate([points_world, dense_samples], axis=0)
-
-    # Fit circle in XY plane.
-    xy = points_world[:, :2]
-    A = np.column_stack([2.0 * xy[:, 0], 2.0 * xy[:, 1], np.ones(xy.shape[0])])
-    b_vec = np.sum(xy ** 2, axis=1)
-    sol, *_ = np.linalg.lstsq(A, b_vec, rcond=None)
-    cx, cy, c = sol
-    radius_est = math.sqrt(max(cx * cx + cy * cy + c, 1e-6))
-    center_world = np.array([cx, cy, rim_height_world], dtype=float)
-
-    # Produce rim points evenly along the circle for downstream use.
-    dense_angles = np.linspace(0.0, 2.0 * math.pi, num=360, endpoint=False)
-    rim_pts_3d = np.stack(
-        [
-            center_world[0] + radius_est * np.cos(dense_angles),
-            center_world[1] + radius_est * np.sin(dense_angles),
-            np.full_like(dense_angles, rim_height_world),
-        ],
-        axis=1,
-    )
-
-    grasp_candidates: List[Dict[str, object]] = []
-    for angle in np.linspace(0.0, 2.0 * math.pi, num=max(sample_count, 8), endpoint=False):
-        radial_dir = np.array([math.cos(angle), math.sin(angle), 0.0])
-        z_axis = np.array([0.0, 0.0, -1.0])
-        x_axis = np.cross(radial_dir, z_axis)
-        if np.linalg.norm(x_axis) < 1e-6:
-            continue
-        x_axis /= np.linalg.norm(x_axis)
-        z_axis = np.cross(x_axis, radial_dir)
-        z_axis /= np.linalg.norm(z_axis)
-        rot = np.column_stack([x_axis, radial_dir, z_axis])
-        quat = _matrix_to_quaternion(rot)
-        grasp_point = np.array(
-            [
-                center_world[0] + radius_est * math.cos(angle),
-                center_world[1] + radius_est * math.sin(angle),
-                rim_height_world + rim_thickness,
+                radius_est * math.cos(ang),
+                radius_est * math.sin(ang),
+                inner_height,
             ],
             dtype=float,
         )
-        quality = float(np.clip(0.85 - 0.1 * abs(math.sin(angle * 2.0)), 0.0, 1.0))
+        feat_world = np.array([bowl_pose.x, bowl_pose.y, bowl_pose.z], dtype=float) + R_wb @ local
+        features_world.append(feat_world)
+    features_world = np.asarray(features_world, dtype=float)
+    uv_target, Z_target = _project_points(features_world, camera_from_world, K)
+    if uv_target is None or Z_target is None or uv_target.shape[0] < 2:
+        cx, cy = float(K[0, 2]), float(K[1, 2])
+        uv_target = np.array([[cx, cy], [cx, cy]], dtype=float)
+        Z_target = np.array([1.0, 1.0], dtype=float)
+
+    # ------------------------------------------------------------------ #
+    # Grasp candidates evenly spaced along rim
+    grasp_candidates: List[Dict[str, object]] = []
+    sample_count = int(getattr(perception_cfg, "rim_sample_count", 24) if perception_cfg else 24)
+    bowl_origin = np.array([bowl_pose.x, bowl_pose.y, bowl_pose.z], dtype=float)
+    for ang in np.linspace(0.0, 2.0 * math.pi, max(sample_count, 8), endpoint=False):
+        radial_local = np.array([math.cos(ang), math.sin(ang), 0.0], dtype=float)
+        tangent_local = np.array([-math.sin(ang), math.cos(ang), 0.0], dtype=float)
+        normal_local = np.array([0.0, 0.0, 1.0], dtype=float)
+        grasp_local = np.array(
+            [
+                radius_est * radial_local[0],
+                radius_est * radial_local[1],
+                inner_height + rim_thickness,
+            ],
+            dtype=float,
+        )
+        grasp_world = bowl_origin + R_wb @ grasp_local
+        radial_world = R_wb @ radial_local
+        tangent_world = R_wb @ tangent_local
+        normal_world = R_wb @ normal_local
+        R_world = np.column_stack([tangent_world, radial_world, normal_world])
+        quat = _matrix_to_quaternion(R_world)
+        quality = float(np.clip(0.95 - 0.1 * abs(math.sin(ang * 2.0)), 0.0, 1.0))
         grasp_candidates.append(
             {
                 "pose_world": {
-                    "position": (float(grasp_point[0]), float(grasp_point[1]), float(grasp_point[2])),
-                    "quaternion": tuple(float(v) for v in quat),
+                    "position": tuple(float(v) for v in grasp_world),
+                    "quaternion": quat,
                 },
                 "quality": quality,
             }
         )
 
-    # Determine features for IBVS as opposite rim points.
-    basis_angles = [0.0, math.pi]
-    uv_pair: List[Tuple[float, float]] = []
-    Z_pair: List[float] = []
-    for ang in basis_angles:
-        point_world = np.array(
-            [
-                center_world[0] + radius_est * math.cos(ang),
-                center_world[1] + radius_est * math.sin(ang),
-                rim_height_world,
-            ],
-            dtype=float,
-        )
-        pix, depth_cam = _project_points(point_world[None, :], camera_from_world, K)
-        uv_pair.append((float(pix[0, 0]), float(pix[0, 1])))
-        Z_pair.append(float(depth_cam[0]))
-
-    return {
-        "rim_pts_3d": rim_pts_3d.astype(np.float32),
+    result = {
+        "rim_pts_3d": rim_points_world.astype(np.float32),
         "center_3d": center_world.astype(np.float32),
         "radius_m": float(radius_est),
         "grasp_candidates": grasp_candidates,
-        "features_px": {"uv_pair": uv_pair, "Z_pair": Z_pair},
+        "features_px": {
+            "uv_pair": [(float(uv_target[i, 0]), float(uv_target[i, 1])) for i in range(uv_target.shape[0])],
+            "Z_pair": [float(Z_target[i]) for i in range(Z_target.shape[0])],
+            "points_world": features_world.astype(np.float32),
+        },
     }
+    return result
 
 
 __all__ = ["detect_bowl_rim"]

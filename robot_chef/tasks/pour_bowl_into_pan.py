@@ -59,14 +59,14 @@ def _matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, float]:
 
 
 def _camera_look_at(camera_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
-    """Return world rotation matrix that points camera -Z axis at target."""
+    """Return world rotation matrix that points camera +Z axis at target."""
     forward = target_pos - camera_pos
     norm = np.linalg.norm(forward)
     if norm < 1e-8:
-        forward = np.array([0.0, 0.0, -1.0], dtype=float)
+        forward = np.array([0.0, 0.0, 1.0], dtype=float)
     else:
         forward /= norm
-    z_cam = -forward
+    z_cam = forward
     up_guess = np.array([0.0, 1.0, 0.0], dtype=float)
     x_cam = np.cross(up_guess, z_cam)
     if np.linalg.norm(x_cam) < 1e-6:
@@ -198,6 +198,7 @@ class PourBowlIntoPanAndReturn:
             rel_xyz=rel_translation,
             rel_rpy_deg=rel_rpy_deg,
         )
+        
         rel_quat = p.getQuaternionFromEuler([math.radians(v) for v in rel_rpy_deg])
         rel_rot = np.array(p.getMatrixFromQuaternion(rel_quat), dtype=float).reshape(3, 3)
         self._T_eef_cam = np.eye(4, dtype=float)
@@ -336,7 +337,7 @@ class PourBowlIntoPanAndReturn:
     ) -> Optional[Dict[str, object]]:
         assert self.camera is not None
         self.camera.aim_at_world((bowl_pose.x, bowl_pose.y, bowl_pose.z))
-        rgb, depth, K = self.camera.get_rgbd()
+        rgb, depth, K, seg_mask = self.camera.get_rgbd(with_segmentation=True)
         depth_valid = depth[depth > 0.0]
         dmin = float(depth_valid.min()) if depth_valid.size else 0.0
         dmax = float(depth_valid.max()) if depth_valid.size else 0.0
@@ -364,6 +365,8 @@ class PourBowlIntoPanAndReturn:
             "world_from_camera": self.camera.world_from_camera,
             "perception_cfg": cfg.perception,
             "bowl_properties": bowl_entry.get("properties", {}),
+            "bowl_pose": bowl_pose,
+            "segmentation": seg_mask,
         }
         try:
             detection = detect_bowl_rim(
@@ -396,25 +399,10 @@ class PourBowlIntoPanAndReturn:
             len(candidates),
         )
 
-        feature_pts_world = np.array(
-            [
-                rim_pts[0],
-                rim_pts[rim_pts.shape[0] // 2],
-            ],
-            dtype=float,
-        )
-        uv, Z = _project_world_points(feature_pts_world, self.camera.camera_from_world, K)
-        if uv is None or Z is None:
-            LOGGER.warning("Projected rim features behind camera on attempt %d", attempt)
-            return None
-
-        detection["features_px"]["uv_pair"] = [(float(uv[i, 0]), float(uv[i, 1])) for i in range(uv.shape[0])]
-        detection["features_px"]["Z_pair"] = [float(z) for z in Z]
-        detection["features_px"]["points_world"] = feature_pts_world
-
+        feature_pts_world = np.asarray(detection["features_px"]["points_world"], dtype=float)
         self._feature_points_world = feature_pts_world
-        self._target_uv = uv
-        self._target_Z = Z
+        self._target_uv = np.asarray(detection["features_px"]["uv_pair"], dtype=float)
+        self._target_Z = np.asarray(detection["features_px"]["Z_pair"], dtype=float)
         return detection
 
     # ------------------------------------------------------------------ #
@@ -433,8 +421,8 @@ class PourBowlIntoPanAndReturn:
             return False
 
         candidates = sorted(detection["grasp_candidates"], key=lambda c: c.get("quality", 0.0), reverse=True)
-        target_uv = np.asarray(self._target_uv, dtype=float)
-        target_Z = np.asarray(self._target_Z, dtype=float)
+        target_uv = np.asarray(self._target_uv, dtype=float).reshape(-1, 2)
+        target_Z = np.asarray(self._target_Z, dtype=float).reshape(-1)
 
         for idx, candidate in enumerate(candidates[:3]):
             LOGGER.info("Attempting grasp candidate %d with quality %.2f", idx + 1, candidate["quality"])
@@ -460,7 +448,7 @@ class PourBowlIntoPanAndReturn:
 
             def get_features() -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
                 self.camera.aim_at_world(tuple(detection.get("center_3d", feature_points_world.mean(axis=0))))
-                _, _, _ = self.camera.get_rgbd()
+                _, _, _, _ = self.camera.get_rgbd()
                 uv_meas, Z_meas = _project_world_points(
                     feature_points_world,
                     self.camera.camera_from_world,

@@ -4,8 +4,8 @@
 - Rebuilt the runtime around a streamlined `RobotChefSimulation` that spawns the plane, table, bowl, pan, dual Panda arms, and grain particles with deterministic seeds.
 - Added typed configuration loading (`robot_chef/config.py`) to preserve the existing YAML schema while exposing structured dataclasses for poses, camera, perception, tolerances, and task timing.
 - Implemented a reusable RGB-D `Camera` wrapper with intrinsic calibration, aiming control, and metric depth conversion for PyBullet captures.
-- Mounted the active camera rigidly to the Panda wrist (hand–eye calibrated) so it tracks the arm during motion.
-- Replaced the perception stack with `perception/bowl_rim.py`, fitting the rim via depth back-projection and delivering grasp candidates plus IBVS-ready feature pairs.
+- Mounted the active camera rigidly to the Panda wrist (hand–eye calibrated) so it tracks the arm during motion and reports consistent CV-frame extrinsics.
+- Replaced the perception stack with `perception/bowl_rim.py`, which uses PyBullet segmentation + depth back-projection (with analytic fallback) to fit the rim robustly and emit grasp candidates plus IBVS-ready feature pairs.
 - Added `VisionRefineController` to run closed-loop image-based visual servoing (IBVS) that maps camera error into Panda joint velocities via a damped SVD pseudo-inverse.
 - Rewrote the pour task pipeline to use the wrist camera, sweep the table when the bowl is not immediately visible, and then sequence perception, grasp refinement, pouring, and placement with overlay diagnostics and structured logging.
 - Added a `scripts/smoke_pour.sh` helper for the CLI contract and documented the refresh in this patch file.
