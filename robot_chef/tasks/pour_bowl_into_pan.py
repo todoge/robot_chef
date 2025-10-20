@@ -157,6 +157,7 @@ class PourBowlIntoPanAndReturn:
 
         self.camera: Optional[Camera] = None
         self.controller: Optional[VisionRefineController] = None
+        self.active_arm_name: str = "right"
 
         self._T_eef_cam = np.eye(4, dtype=float)
         self._T_cam_eef = np.eye(4, dtype=float)
@@ -190,11 +191,21 @@ class PourBowlIntoPanAndReturn:
             noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob),
         )
 
+        # Choose closer arm to the bowl and mount the wrist camera there
+        bowl_pos_cfg = np.array([cfg.bowl_pose.x, cfg.bowl_pose.y, cfg.bowl_pose.z], dtype=float)
+        ls_left = p.getLinkState(sim.left_arm.body_id, sim.left_arm.ee_link, computeForwardKinematics=True, physicsClientId=sim.client_id)
+        ls_right = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, computeForwardKinematics=True, physicsClientId=sim.client_id)
+        d_left = float(np.linalg.norm(bowl_pos_cfg - np.asarray(ls_left[4], dtype=float)))
+        d_right = float(np.linalg.norm(bowl_pos_cfg - np.asarray(ls_right[4], dtype=float)))
+        use_left = d_left <= d_right
+        active = sim.left_arm if use_left else sim.right_arm
+        self.active_arm_name = "left" if use_left else "right"
+
         rel_translation = (0.06, 0.0, 0.12)
         rel_rpy_deg = (-10.0, -65.0, 0.0)
         self.camera.mount_to_link(
-            parent_body_id=sim.right_arm.body_id,
-            parent_link_id=sim.right_arm.ee_link,
+            parent_body_id=active.body_id,
+            parent_link_id=active.ee_link,
             rel_xyz=rel_translation,
             rel_rpy_deg=rel_rpy_deg,
         )
@@ -206,19 +217,21 @@ class PourBowlIntoPanAndReturn:
         self._T_eef_cam[:3, 3] = np.array(rel_translation, dtype=float)
         self._T_cam_eef = np.linalg.inv(self._T_eef_cam)
 
+        LOGGER.info("Using %s arm and wrist camera", self.active_arm_name.upper())
+
         self.controller = VisionRefineController(
             client_id=sim.client_id,
-            arm_id=sim.right_arm.body_id,
-            ee_link=sim.right_arm.ee_link,
-            arm_joints=sim.right_arm.joint_indices,
+            arm_id=active.body_id,
+            ee_link=active.ee_link,
+            arm_joints=active.joint_indices,
             dt=sim.dt,
             camera=self.camera,
-            handeye_T_cam_in_eef=self._T_eef_cam,
-            gripper_open=lambda width=0.08: sim.gripper_open(width=width, arm="right"),
-            gripper_close=lambda force=60.0: sim.gripper_close(force=force, arm="right"),
+            handeye_T_cam_in_eef=self._T_cam_eef,
+            gripper_open=lambda width=0.08: sim.gripper_open(width=width, arm=self.active_arm_name),
+            gripper_close=lambda force=60.0: sim.gripper_close(force=force, arm=self.active_arm_name),
         )
 
-        sim.gripper_open(arm="right")
+        sim.gripper_open(arm=self.active_arm_name)
         if cfg.particles > 0:
             sim.spawn_rice_particles(cfg.particles, seed=cfg.seed)
 
@@ -336,7 +349,6 @@ class PourBowlIntoPanAndReturn:
         attempt: int,
     ) -> Optional[Dict[str, object]]:
         assert self.camera is not None
-        self.camera.aim_at_world((bowl_pose.x, bowl_pose.y, bowl_pose.z))
         rgb, depth, K, seg_mask = self.camera.get_rgbd(with_segmentation=True)
         depth_valid = depth[depth > 0.0]
         dmin = float(depth_valid.min()) if depth_valid.size else 0.0
@@ -447,7 +459,6 @@ class PourBowlIntoPanAndReturn:
             feature_points_world = self._feature_points_world
 
             def get_features() -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-                self.camera.aim_at_world(tuple(detection.get("center_3d", feature_points_world.mean(axis=0))))
                 _, _, _, _ = self.camera.get_rgbd()
                 uv_meas, Z_meas = _project_world_points(
                     feature_points_world,

@@ -187,7 +187,6 @@ def detect_bowl_rim(
     for ang in np.linspace(0.0, 2.0 * math.pi, max(sample_count, 8), endpoint=False):
         radial_local = np.array([math.cos(ang), math.sin(ang), 0.0], dtype=float)
         tangent_local = np.array([-math.sin(ang), math.cos(ang), 0.0], dtype=float)
-        normal_local = np.array([0.0, 0.0, 1.0], dtype=float)
         grasp_local = np.array(
             [
                 radius_est * radial_local[0],
@@ -199,8 +198,30 @@ def detect_bowl_rim(
         grasp_world = bowl_origin + R_wb @ grasp_local
         radial_world = R_wb @ radial_local
         tangent_world = R_wb @ tangent_local
-        normal_world = R_wb @ normal_local
-        R_world = np.column_stack([tangent_world, radial_world, normal_world])
+
+        z_axis = -radial_world
+        z_norm = np.linalg.norm(z_axis)
+        if z_norm < 1e-6:
+            continue
+        z_axis /= z_norm
+
+        x_axis = tangent_world
+        x_norm = np.linalg.norm(x_axis)
+        if x_norm < 1e-6:
+            continue
+        x_axis /= x_norm
+
+        y_axis = np.cross(z_axis, x_axis)
+        y_norm = np.linalg.norm(y_axis)
+        if y_norm < 1e-6:
+            continue
+        y_axis /= y_norm
+
+        # Re-orthogonalise x_axis in case of numerical drift
+        x_axis = np.cross(y_axis, z_axis)
+        x_axis /= np.linalg.norm(x_axis)
+
+        R_world = np.column_stack([x_axis, y_axis, z_axis])
         quat = _matrix_to_quaternion(R_world)
         quality = float(np.clip(0.95 - 0.1 * abs(math.sin(ang * 2.0)), 0.0, 1.0))
         grasp_candidates.append(
