@@ -17,11 +17,12 @@ def main():
     # Defer imports so the agent can regenerate these modules:
     from robot_chef.tasks.pour_bowl_into_pan import PourBowlIntoPanAndReturn
     from robot_chef import config  # agent will create
-    from robot_chef.simulation import RobotChefSimulation  # agent will create
+    from robot_chef.isolated_simulation import RobotChefSimulation  # agent will create
 
     cfg = config.load_pour_task_config(Path(args.config))
     sim = RobotChefSimulation(gui=not args.headless, recipe=cfg)
     task = PourBowlIntoPanAndReturn()
+    '''
     try:
         task.setup(sim, cfg)
         planned = task.plan(sim, cfg)
@@ -35,6 +36,9 @@ def main():
         sys.exit(0 if ok else 1)
     finally:
         sim.disconnect()
+    '''
+    while True:
+        x = 1 
 
 if __name__ == "__main__":
     main()
