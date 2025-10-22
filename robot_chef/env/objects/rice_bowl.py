@@ -16,8 +16,8 @@ def create_rice_bowl(
     inner_height: float = 0.05,
     wall_thickness: float = 0.008,
     base_thickness: float = 0.006,
-    mass: float = 0.3,
-    friction: float = 0.8,
+    mass: float = 0.4,
+    friction: float = 2,
 ) -> Tuple[int, Dict[str, float]]:
     """Spawn a compound rice bowl that can contain particles."""
     orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
@@ -80,6 +80,7 @@ def create_rice_bowl(
         baseOrientation=orientation,
         physicsClientId=client_id,
     )
+    '''
     p.changeDynamics(
         bodyUniqueId=body_id,
         linkIndex=-1,
@@ -89,6 +90,22 @@ def create_rice_bowl(
         restitution=0.0,
         physicsClientId=client_id,
     )
+    '''
+    p.changeDynamics(
+        bodyUniqueId=body_id,
+        linkIndex=-1,
+        lateralFriction=friction,
+        spinningFriction=friction,
+        rollingFriction=friction * 0.5,
+        restitution=0.0,
+        linearDamping=0.5,  # Added: Damp linear motion
+        angularDamping=0.5,  # Added: Damp rotation
+        contactStiffness=50000,  # Added: Stiff contacts
+        contactDamping=2000,  # Added: Contact damping
+        collisionMargin=0.002,  # Added: Collision margin
+        physicsClientId=client_id,
+    )
+    
     properties = {
         "radius": radius,
         "inner_radius": inner_radius,

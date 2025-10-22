@@ -19,8 +19,9 @@ OBJ_DETECTION_LABELS = [
     ]
 
 class Object_Detector:
-  def __init__(self): 
+  def __init__(self, img_size): 
     self.obj_detection_model = self.setup()
+    self.img_size = img_size
     self.bbox = None
 
   def setup(self):
@@ -63,8 +64,8 @@ class Object_Detector:
     self.bbox = bbox
     return bbox
 
-  def get_bbox_mask(self, img_shape, padding=0):
-    mask = np.zeros(img_shape, dtype=np.float32)
+  def get_bbox_mask(self, padding=0):
+    mask = np.zeros(self.img_size, dtype=np.float32)
     
     if self.bbox is None:
       print("You have yet to predict an object")  
@@ -74,9 +75,9 @@ class Object_Detector:
     
     # Add padding
     min_row = max(0, min_row - padding)
-    max_row = min(img_shape[0], max_row + padding)
+    max_row = min(self.img_size[0], max_row + padding)
     min_col = max(0, min_col - padding)
-    max_col = min(img_shape[1], max_col + padding)
+    max_col = min(self.img_size[1], max_col + padding)
     
     mask[min_row:max_row, min_col:max_col] = 1.0
     self.bbox = None # reset so wont call without taking a new prediction

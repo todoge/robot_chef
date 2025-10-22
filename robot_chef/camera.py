@@ -27,10 +27,10 @@ class Camera:
         client_id: int,
         view_xyz: Sequence[float],
         view_rpy_deg: Sequence[float],
-        fov_deg: float,
-        near: float = 0.02,
+        fov_deg: float = 60,
+        near: float = 0.1,
         far: float = 3.0,
-        resolution: Tuple[int, int] = (640, 480),
+        resolution: Tuple[int, int] = (224,224), #(640, 480),
         noise: Optional[CameraNoiseModel] = None,
     ) -> None:
         self.client_id = int(client_id)
@@ -54,7 +54,7 @@ class Camera:
     def aim_at(self, target_xyz: Sequence[float], distance: float, height_delta: float) -> None:
         """Reposition camera so that the supplied target sits near the image center."""
         target = np.asarray(target_xyz, dtype=float)
-        forward = self._orientation_matrix() @ np.array([0.0, 0.0, -1.0])
+        forward = self._orientation_matrix() @ np.array([0.0, 0.0, 1.0])
         forward_norm = math.hypot(forward[0], forward[1])
         if forward_norm < 1e-5:
             forward = np.array([1.0, 0.0, -0.2])
@@ -100,14 +100,17 @@ class Camera:
         )
         rgb = np.reshape(np.asarray(img[2], dtype=np.uint8), (height, width, 4))[..., :3].copy()
         depth_buffer = np.reshape(np.asarray(img[3], dtype=np.float32), (height, width))
-        depth = self._depth_buffer_to_meters(depth_buffer)
+        depth_buffer[np.isinf(depth_buffer)] = np.nan
+        depth_buffer = np.nan_to_num(depth_buffer, nan=np.nanmedian(depth_buffer))
+        depth = self._depth_buffer_to_meters(depth_buffer).astype(np.float32)
+        depth_normalized = depth - np.mean(depth)
 
         if self._noise.depth_std > 0.0:
             depth += np.random.normal(0.0, self._noise.depth_std, size=depth.shape).astype(np.float32)
         if self._noise.drop_prob > 0.0:
             mask = np.random.random(size=depth.shape) < float(self._noise.drop_prob)
             depth[mask] = 0.0
-        return rgb, depth.astype(np.float32), self._intrinsics.copy()
+        return rgb, depth_buffer, depth_normalized, self._intrinsics.copy()
 
     @property
     def intrinsics(self) -> np.ndarray:
@@ -134,7 +137,7 @@ class Camera:
 
     def _update_matrices(self) -> None:
         rot = self._orientation_matrix()
-        forward = rot @ np.array([0.0, 0.0, -1.0])
+        forward = rot @ np.array([0.0, 0.0, 1.0])
         up = rot @ np.array([0.0, 1.0, 0.0])
         target = self._position + forward
         view = p.computeViewMatrix(
