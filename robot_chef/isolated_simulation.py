@@ -10,8 +10,10 @@
 
 from __future__ import annotations
 
+import os
 import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -20,6 +22,7 @@ import pybullet as p
 import pybullet_data
 
 from .tasks.detect_object import Object_Detector
+from .tasks.predict_grasp import Grasp_Predictor
 
 from .config import Pose6D, PourTaskConfig
 from .env.objects import pan as pan_factory
@@ -38,6 +41,7 @@ class ArmState:
     body_id: int
     joint_indices: Tuple[int, ...]
     ee_link: int
+    eef: int
     finger_joints: Tuple[int, int]
     joint_lower: Tuple[float, ...]
     joint_upper: Tuple[float, ...]
@@ -98,10 +102,18 @@ class RobotChefSimulation:
         self.gripper_open()
         self.step_simulation(steps=60)
 
-        obj_detector = Object_Detector()
-
-    # ------------------------------------------------------------------ #
-    # Environment & robot helpers
+        self.obj_detector = Object_Detector()
+        self.grasping_predictor = Grasp_Predictor()
+        self.IMG_WIDTH = 224
+        self.IMG_HEIGHT = 224
+        
+        # Grasp execution parameters
+        self.RECALIBRATE_HEIGHT = 0.4  # Height above for predicting grasp processing
+        self.APPROACH_HEIGHT = 0.25  # Height above object for pre-grasp
+        self.GRASP_CLEARANCE = 0.08  # Clearance when grasping
+        self.LIFT_HEIGHT = 0.35      # Height to lift object to
+        self.FRAME_MARKER_URDF = os.path.join(os.path.dirname(os.path.realpath(__file__)), "env/frame_marker.urdf")
+        self.eef_marker = p.loadURDF(self.FRAME_MARKER_URDF, [0, 0, 0], useFixedBase=True, globalScaling=0.18)
 
     def _setup_environment(self) -> None:
         LOGGER.info("Setting up environment objects")
@@ -323,6 +335,11 @@ class RobotChefSimulation:
             LOGGER.warning("panda_hand link not found; defaulting to final arm joint link")
             ee_link_index = joint_indices[-1]
 
+        n = p.getNumJoints(arm_id)
+        link_names = [p.getJointInfo(arm_id, j)[12].decode("utf-8") for j in range(n)]
+        eef_link_name = "panda_hand"
+        eef = link_names.index(eef_link_name) #returns eef coordinate, ee_link_index is joint index
+
         # Finger joints.
         finger_joint_names = {"panda_finger_joint1", "panda_finger_joint2"}
         fingers: List[int] = []
@@ -349,6 +366,7 @@ class RobotChefSimulation:
             body_id=arm_id,
             joint_indices=tuple(joint_indices),
             ee_link=ee_link_index,
+            eef=eef,
             finger_joints=(fingers[0], fingers[1]),
             joint_lower=tuple(joint_lower),
             joint_upper=tuple(joint_upper),
@@ -387,7 +405,7 @@ class RobotChefSimulation:
             physicsClientId=self.client_id,
         )
 
-    def set_joint_velocities(
+    def set_joint_velocities( #Unused
         self,
         qdot_target: Sequence[float],
         arm: Optional[str] = None,
@@ -533,6 +551,87 @@ class RobotChefSimulation:
     # Backwards-compatible alias (used by older code)
     def _place_on_table(self, body_id: int, z_table: float) -> None:
         self._place_on_support(body_id, support_top_z=z_table)
+
+    # Tutorial code to spawn markers for visualisation
+    def _spawn_keypose_markers(self, keyposes, orn, scale=0.1):
+      for name, pos in keyposes.items():
+          p.loadURDF(self.FRAME_MARKER_URDF, pos, orn, useFixedBase=True, globalScaling=scale)
+          # Add text above the frame
+          text_pos = [pos[0], pos[1], pos[2] + 0.01]
+          p.addUserDebugText(name, text_pos, textColorRGB=[1, 1, 0], textSize=1.2)
+
+    # Tutorial code
+    def _smooth_joint_targets(body_id: int, joint_indices: List[int], ik_targets: List[float], step_size=0.02):
+        out = []
+        for k, j in enumerate(joint_indices):
+            curr = p.getJointState(body_id, j)[0]
+            tgt  = float(ik_targets[k])
+            delta = tgt - curr
+            if delta > step_size: new = curr + step_size
+            elif delta < -step_size: new = curr - step_size
+            else: new = tgt
+            out.append(new)
+        return out
+
+    # Tutorial code (slightly modified to fit class)
+    def move_arm_to_pose(self, arm,
+                     target_pos: List[float],
+                     target_orn: Tuple[float, float, float, float],
+                     max_secs=2.0,
+                     pos_gain=0.2,
+                     vel_gain=1.0,
+                     torque=200,
+                     eef_marker=None):
+        """IK + PD stepper until EE is near target or timeout."""
+        max_steps = int(max_secs / self.dt)
+        for _ in range(max_steps):
+            rest = [p.getJointState(arm["body_id"], j)[0] for j in arm["joint_indices"]]
+            ik = p.calculateInverseKinematics(
+                arm["body_id"], arm["eef"],
+                target_pos, target_orn,
+                lowerLimits=arm["joint_lower"], upperLimits=arm["joint_upper"], jointRanges=arm["joing_ranges"], restPoses=rest
+            )
+            ik = list(ik[:len(arm["joint_indices"])])
+            smoothed = self._smooth_joint_targets(arm["body_id"], arm["joint_indices"], ik, step_size=0.008)
+            for idx, j in enumerate(arm["joint_indices"][:-2]):
+                p.setJointMotorControl2(arm["body_id"], j, p.POSITION_CONTROL,
+                                        targetPosition=smoothed[idx],
+                                        positionGain=pos_gain, velocityGain=vel_gain, force=torque)
+                
+            if eef_marker:
+                pos, orn = p.getLinkState(arm["body_id"], arm["eef"])[4:6]
+                p.resetBasePositionAndOrientation(eef_marker, pos, orn)
+
+            p.stepSimulation()
+            time.sleep(self.dt)
+
+            pos, orn = p.getLinkState(arm["body_id"], arm["eef"])[4:6]
+            pos_err = np.linalg.norm(np.array(pos) - np.array(target_pos))
+            orn_err = 1 - abs(np.dot(orn, target_orn))
+            if pos_err < 0.001 and orn_err < 0.0001:
+                return True
+        return False
+
+    def move_gripper_straight_down(self, pregrasp_pose, grasp_pose, grasp_orn, arm):
+        start_pos = np.array(pregrasp_pose)
+        end_pos = np.array(grasp_pose)
+        down_orn = p.getQuaternionFromEuler([math.pi, 0, 0]) #gripper to look down
+        steps = 500
+        half_steps = steps // 2 # rotation of gripper should reach endgoal halfway down
+        trajectory = [start_pos + (end_pos - start_pos) * t/steps for t in range(steps+1)]
+        orn_traj = []
+        for i in range(half_steps):
+            t = i / (half_steps - 1)   # normalized [0,1] for slerp smoothness
+            q = p.getQuaternionSlerp(down_orn, grasp_orn, t)
+            orn_traj.append(q)
+        for i in range(steps - half_steps):
+            orn_traj.append(grasp_orn) # fix gripper angled position for the rest of the journey
+
+        for pos, orn in zip(trajectory, orn_traj):
+          joint_pos = p.calculateInverseKinematics(arm["body_id"], arm["eef"], pos, orn)
+          p.setJointMotorControlArray(arm["body_id"], arm["joint_indices"], p.POSITION_CONTROL, joint_pos)
+          p.stepSimulation()
+          time.sleep(self.dt) # [IMPT]: reduce jumping of joints for real life time simulation
 
 
 __all__ = ["RobotChefSimulation", "ArmState"]

@@ -19,45 +19,68 @@ OBJ_DETECTION_LABELS = [
     ]
 
 class Object_Detector:
-    def __init__(self): 
-      self.obj_detection_model = self.setup()
+  def __init__(self): 
+    self.obj_detection_model = self.setup()
+    self.bbox = None
 
-    def setup(self):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        obj_detection_model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights='DEFAULT')
-        obj_detection_model.to(device)
-        obj_detection_model.eval()
+  def setup(self):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    obj_detection_model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights='DEFAULT')
+    obj_detection_model.to(device)
+    obj_detection_model.eval()
 
-        return obj_detection_model
+    return obj_detection_model
 
-    def rgb_to_img_tensor(self, rgb_img):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        rgb_float = rgb_img.astype(np.float32) / 255.0
-        img_tensor = F.to_tensor(rgb_float).to(device)
-        return img_tensor
+  def rgb_to_img_tensor(self, rgb_img):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    rgb_float = rgb_img.astype(np.float32) / 255.0
+    img_tensor = F.to_tensor(rgb_float).to(device)
+    return img_tensor
 
-    def detect_object(self, rgb_img, threshold=0): #threshold is confidence cutoff
-        img_tensor = self.rgb_to_img_tensor(rgb_img)
-        with torch.no_grad():
-            detections = self.obj_detection_model([img_tensor])[0]
-        pred_scores = detections['scores'].cpu().numpy()
-        scores = pred_scores[pred_scores >= threshold]
-        pred_bboxes = detections['boxes'].cpu().numpy()
-        boxes = pred_bboxes[pred_scores >= threshold].astype(np.int32)
-        labels = detections['labels'][:len(boxes)]
-        pred_classes = [OBJ_DETECTION_LABELS[i] for i in labels.cpu().numpy()]
-        bbox = None
-        for box, label, score in zip(boxes, pred_classes, scores):
-            if score < threshold:
-                continue
-            x1, y1, x2, y2 = box.astype(int)
-            x1 = int(x1)
-            y1 = int(y1)
-            x2 = int(x2)
-            y2 = int(y2)
-            bbox = (y1,y2,x1,x2)
-            print(f"Detected object {label} with score {score:.2f} at {x1},{y1},{x2},{y2}")
-            break # to take take the highest confidence right now cause the model is detecting rubbish
-        print("bbox: ", bbox)
-        return bbox
+  def detect_object(self, rgb_img, threshold=0): #threshold is confidence cutoff
+    img_tensor = self.rgb_to_img_tensor(rgb_img)
+    with torch.no_grad():
+        detections = self.obj_detection_model([img_tensor])[0]
+    pred_scores = detections['scores'].cpu().numpy()
+    scores = pred_scores[pred_scores >= threshold]
+    pred_bboxes = detections['boxes'].cpu().numpy()
+    boxes = pred_bboxes[pred_scores >= threshold].astype(np.int32)
+    labels = detections['labels'][:len(boxes)]
+    pred_classes = [OBJ_DETECTION_LABELS[i] for i in labels.cpu().numpy()]
+    bbox = None
+    for box, label, score in zip(boxes, pred_classes, scores):
+        if score < threshold:
+            continue
+        x1, y1, x2, y2 = box.astype(int)
+        x1 = int(x1)
+        y1 = int(y1)
+        x2 = int(x2)
+        y2 = int(y2)
+        bbox = (y1,y2,x1,x2)
+        print(f"Detected object {label} with score {score:.2f} at {x1},{y1},{x2},{y2}")
+        break # to take take the highest confidence right now cause the model is detecting rubbish
+    print("bbox: ", bbox)
+    self.bbox = bbox
+    return bbox
+
+  def get_bbox_mask(self, img_shape, padding=0):
+    mask = np.zeros(img_shape, dtype=np.float32)
+    
+    if self.bbox is None:
+      print("You have yet to predict an object")  
+      return mask
+    
+    min_row, max_row, min_col, max_col = self.bbox
+    
+    # Add padding
+    min_row = max(0, min_row - padding)
+    max_row = min(img_shape[0], max_row + padding)
+    min_col = max(0, min_col - padding)
+    max_col = min(img_shape[1], max_col + padding)
+    
+    mask[min_row:max_row, min_col:max_col] = 1.0
+    self.bbox = None # reset so wont call without taking a new prediction
+    
+    return mask
+  
 
