@@ -62,7 +62,8 @@ class Object_Detector:
         break # to take take the highest confidence right now cause the model is detecting rubbish
     print("bbox: ", bbox)
     self.bbox = bbox
-    return bbox
+    center_coord = (int((y1+y2)/2),int((x1+x2)/2))
+    return bbox, center_coord
 
   def get_bbox_mask(self, padding=0):
     mask = np.zeros(self.img_size, dtype=np.float32)
@@ -80,7 +81,6 @@ class Object_Detector:
     max_col = min(self.img_size[1], max_col + padding)
     
     mask[min_row:max_row, min_col:max_col] = 1.0
-    self.bbox = None # reset so wont call without taking a new prediction
     
     return mask
   

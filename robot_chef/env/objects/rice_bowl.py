@@ -162,7 +162,7 @@ def create_round_bowl(
 
     return body_id, properties
 
-def extract_bowl_parameters_from_stl(stl_path: str, mass) -> Dict[str, float]:
+def extract_bowl_parameters_from_stl(stl_path: str, mass, scale=1.0) -> Dict[str, float]:
     """
     Analyze STL mesh to estimate bowl parameters.
     
@@ -249,11 +249,11 @@ def extract_bowl_parameters_from_stl(stl_path: str, mass) -> Dict[str, float]:
         estimated_mass = (volume / 1e9) * 2500  # Convert mm^3 to m^3
     
     parameters = {
-        "radius": float(outer_radius),
-        "inner_radius": float(inner_radius),
-        "base_thickness": float(base_thickness),
-        "inner_height": float(inner_height),
-        "spawn_height": float(inner_height * 0.7),  # For particle spawning
+        "radius": float(outer_radius) * scale,
+        "inner_radius": float(inner_radius) * scale,
+        "base_thickness": float(base_thickness) * scale,
+        "inner_height": float(inner_height) * scale,
+        "spawn_height": float(inner_height * 0.7) * scale,   # For particle spawning
         "mass" : mass
     }
     
@@ -362,18 +362,23 @@ def create_square_bowl(
 
     return body_id, properties
 
-def create_rounded_bowl(client_id, pose, mass=0.4, friction=2.0):
+def create_rounded_bowl(client_id, pose, mass=0.3, friction=2.0):
 
     stl_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bowl.stl")
     vhacd_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bowl_vhacd.obj")
+
+    mesh_scale = [0.7, 0.7, 0.7]
+
     collision_shape_id = p.createCollisionShape(
         shapeType=p.GEOM_MESH,
         fileName=vhacd_file_path,
+        meshScale = mesh_scale,
         physicsClientId=client_id,
     )
     visual_shape_id = p.createVisualShape(
         shapeType=p.GEOM_MESH,
         fileName=stl_file_path,
+        meshScale=mesh_scale,
         physicsClientId=client_id,
     )
     orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
@@ -399,7 +404,7 @@ def create_rounded_bowl(client_id, pose, mass=0.4, friction=2.0):
         physicsClientId=client_id,
     )
 
-    params = extract_bowl_parameters_from_stl(stl_file_path, mass)
+    params = extract_bowl_parameters_from_stl(stl_file_path, mass, scale=mesh_scale[0])
     return body_id, params
 
 
