@@ -7,6 +7,7 @@ from typing import Dict, Tuple
 from ... import config
 
 import pybullet as p
+import numpy as np
 import math
 import os
 from typing import Tuple, Dict
@@ -161,6 +162,103 @@ def create_round_bowl(
 
     return body_id, properties
 
+def extract_bowl_parameters_from_stl(stl_path: str, mass) -> Dict[str, float]:
+    """
+    Analyze STL mesh to estimate bowl parameters.
+    
+    Args:
+        stl_path: Path to STL file
+    
+    Returns:
+        Dictionary with estimated bowl parameters
+    """
+    try:
+        import trimesh
+    except ImportError:
+        print("Installing trimesh... Run: pip install trimesh")
+        import subprocess
+        subprocess.check_call(['pip', 'install', 'trimesh'])
+        import trimesh
+    
+    # Load mesh
+    mesh = trimesh.load(stl_path)
+    vertices = mesh.vertices
+    
+    # Get bounding box
+    bounds = mesh.bounds  # [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+    min_bounds = bounds[0]
+    max_bounds = bounds[1]
+    
+    # Estimate parameters
+    
+    # 1. Height (Z dimension)
+    base_z = min_bounds[2]
+    top_z = max_bounds[2]
+    total_height = top_z - base_z
+    
+    # 2. Outer radius (max XY distance from center)
+    # Find center in XY plane
+    center_x = (min_bounds[0] + max_bounds[0]) / 2
+    center_y = (min_bounds[1] + max_bounds[1]) / 2
+    
+    # Calculate distances from center for all vertices
+    xy_distances = np.sqrt((vertices[:, 0] - center_x)**2 + (vertices[:, 1] - center_y)**2)
+    outer_radius = np.max(xy_distances)
+    
+    # 3. Base thickness - find vertices near bottom
+    bottom_threshold = base_z + total_height * 0.1  # Bottom 10%
+    bottom_vertices = vertices[vertices[:, 2] < bottom_threshold]
+    
+    if len(bottom_vertices) > 0:
+        base_thickness = np.max(bottom_vertices[:, 2]) - base_z
+    else:
+        base_thickness = total_height * 0.1  # Estimate 10% of height
+    
+    # 4. Inner height (height of walls)
+    inner_height = total_height - base_thickness
+    
+    # 5. Inner radius - find minimum XY distance at rim level
+    # Look at vertices near the top (rim)
+    rim_threshold = top_z - inner_height * 0.1  # Top 10%
+    rim_vertices = vertices[vertices[:, 2] > rim_threshold]
+    
+    if len(rim_vertices) > 0:
+        rim_distances = np.sqrt((rim_vertices[:, 0] - center_x)**2 + (rim_vertices[:, 1] - center_y)**2)
+        # Inner radius is the minimum distance at rim (inner edge)
+        inner_radius = np.min(rim_distances)
+        wall_thickness = outer_radius - inner_radius
+    else:
+        # Estimate wall thickness as 10% of radius
+        wall_thickness = outer_radius * 0.1
+        inner_radius = outer_radius - wall_thickness
+    
+    # 6. Mass - estimate from volume and material density
+    volume = mesh.volume  # in m^3 if STL is in meters
+    # Assume ceramic/glass density: ~2500 kg/m^3
+    estimated_mass = volume * 2500
+    
+    # If STL is in mm, convert
+    if outer_radius > 1.0:  # Likely in mm
+        print("STL appears to be in millimeters, converting to meters...")
+        outer_radius /= 1000
+        inner_radius /= 1000
+        wall_thickness /= 1000
+        base_thickness /= 1000
+        inner_height /= 1000
+        total_height /= 1000
+        estimated_mass = (volume / 1e9) * 2500  # Convert mm^3 to m^3
+    
+    parameters = {
+        "radius": float(outer_radius),
+        "inner_radius": float(inner_radius),
+        "base_thickness": float(base_thickness),
+        "inner_height": float(inner_height),
+        "spawn_height": float(inner_height * 0.7),  # For particle spawning
+        "mass" : mass
+    }
+    
+    return parameters
+
 def create_square_bowl(
     client_id: int,
     pose: config.Pose6D,
@@ -267,9 +365,10 @@ def create_square_bowl(
 def create_rounded_bowl(client_id, pose, mass=0.4, friction=2.0):
 
     stl_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bowl.stl")
+    vhacd_file_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bowl_vhacd.obj")
     collision_shape_id = p.createCollisionShape(
         shapeType=p.GEOM_MESH,
-        fileName=stl_file_path,
+        fileName=vhacd_file_path,
         physicsClientId=client_id,
     )
     visual_shape_id = p.createVisualShape(
@@ -299,7 +398,9 @@ def create_rounded_bowl(client_id, pose, mass=0.4, friction=2.0):
         angularDamping=0.8,
         physicsClientId=client_id,
     )
-    return body_id
+
+    params = extract_bowl_parameters_from_stl(stl_file_path, mass)
+    return body_id, params
 
 
 def create_rice_bowl(

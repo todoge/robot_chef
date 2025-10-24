@@ -85,5 +85,6 @@ def spawn_spheres(
             restitution=0.0,
             physicsClientId=client_id,
         )
+        p.changeDynamics(body_id, -1, ccdSweptSphereRadius=bowl_radius, contactProcessingThreshold=bowl_radius)
         body_ids.append(body_id)
     return ParticleSet(body_ids=body_ids, radius=radius)

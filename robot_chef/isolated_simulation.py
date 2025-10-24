@@ -62,6 +62,7 @@ class RobotChefSimulation:
         self.recipe = recipe
         self.gui = gui
         self.client_id = p.connect(p.GUI if gui else p.DIRECT)
+
         #p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 1)
         LOGGER.info("Connected to PyBullet with client_id=%s (gui=%s)", self.client_id, gui)
 
@@ -74,15 +75,20 @@ class RobotChefSimulation:
 
         self.objects: Dict[str, Dict[str, object]] = {}
         self.particles: Optional[ParticleSet] = None
+        print("testing")
 
         # Build environment (table, bowl, pan, stove) and snap with AABBs
         self._setup_environment()
+
+        print("Finish setting up")
 
         # Pedestals with collision-safe placement and arm mounting
         left_mount_id, right_mount_id, z_table = self._place_pedestals_clear_of_table(
             side=0.20,   # 20 cm square column
             margin=0.08  # 8 cm clearance from table edges
         )
+
+        print("Finish placing pedestals")
         self.objects["left_mount"] = {"body_id": left_mount_id, "top_z": z_table}
         self.objects["right_mount"] = {"body_id": right_mount_id, "top_z": z_table}
 
@@ -99,6 +105,7 @@ class RobotChefSimulation:
             base_position=[right_base_pos[0], right_base_pos[1], z_table],
             base_orientation=p.getQuaternionFromEuler([0.0, 0.0, yaw - math.pi / 2.0]),
         )
+        print("Finish spawning arms")
 
         # Default active arm is the right arm for pouring motions.
         self._active_arm_name = "left"
@@ -142,15 +149,23 @@ class RobotChefSimulation:
         # Create bowl and pan at configured poses (apply world yaw).
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
         print(f"Creating bowl at pose: {bowl_pose}")
-        bowl_id = bowl_factory.create_rounded_bowl(self.client_id, pose=bowl_pose)
+        bowl_id, props = bowl_factory.create_rounded_bowl(self.client_id, pose=bowl_pose)
         print(f"Bowl created with body id: {bowl_id}")
         aabb_min, aabb_max = p.getAABB(bowl_id, physicsClientId=self.client_id)
         print(f"Bowl AABB min: {aabb_min}, max: {aabb_max}")
+        visual_shapes = p.getVisualShapeData(bowl_id)
+        # Get collision shape data
+        collision_shapes = p.getCollisionShapeData(bowl_id, -1)
+
+        print("Visual shapes:", visual_shapes)
+        print("Collision shapes:", collision_shapes)
+
+
         if "bowl" in self.objects:
             p.removeBody(self.objects["bowl"]["body_id"], physicsClientId=self.client_id)
             del self.objects["bowl"]
-        self.objects["bowl"] = {"body_id": bowl_id, "properties": None, "pose": bowl_pose}
-        '''
+        self.objects["bowl"] = {"body_id": bowl_id, "properties": props, "pose": bowl_pose}
+        ''' 
         pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
         pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
         self.objects["pan"] = {"body_id": pan_id, "properties": pan_props, "pose": pan_pose}
@@ -203,6 +218,7 @@ class RobotChefSimulation:
             "pose": stove_pose,
         }
         '''
+        
         # --- Deterministic placement using AABBs ---
         z_table = self._get_table_top_z()
         print(f"Placing bowl on support at Z={z_table}")
@@ -215,6 +231,7 @@ class RobotChefSimulation:
 
         # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
+        self.spawn_rice_particles(30)
 
         # Expose pan base height after snapping (useful for later metrics).
         #pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
