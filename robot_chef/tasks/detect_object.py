@@ -69,7 +69,7 @@ class Object_Detector:
     
     if self.bbox is None:
       print("You have yet to predict an object")  
-      return mask
+      return None
     
     min_row, max_row, min_col, max_col = self.bbox
     

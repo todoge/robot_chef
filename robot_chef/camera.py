@@ -27,6 +27,7 @@ class Camera:
         client_id: int,
         view_xyz: Sequence[float],
         view_rpy_deg: Sequence[float],
+        table_height: float,
         fov_deg: float = 60,
         near: float = 0.1,
         far: float = 3.0,
@@ -42,6 +43,7 @@ class Camera:
         self._width = int(resolution[0])
         self._height = int(resolution[1])
         self._noise = noise or CameraNoiseModel()
+        self._table_height = table_height
 
         self._orientation_quat = p.getQuaternionFromEuler(np.radians(self._rpy_deg))
         self._target = self._position + self._orientation_matrix() @ np.array([0.0, 0.0, -1.0])
@@ -103,7 +105,7 @@ class Camera:
         depth_buffer[np.isinf(depth_buffer)] = np.nan
         depth_buffer = np.nan_to_num(depth_buffer, nan=np.nanmedian(depth_buffer))
         depth = self._depth_buffer_to_meters(depth_buffer).astype(np.float32)
-        depth_normalized = depth - np.mean(depth)
+        depth_normalized = depth - np.median(depth)
 
         if self._noise.depth_std > 0.0:
             depth += np.random.normal(0.0, self._noise.depth_std, size=depth.shape).astype(np.float32)
@@ -178,7 +180,10 @@ class Camera:
     def _depth_buffer_to_meters(self, depth_buffer: np.ndarray) -> np.ndarray:
         near, far = self._near, self._far
         depth = (2.0 * near * far) / (far + near - (2.0 * depth_buffer - 1.0) * (far - near))
-        return depth
+        camera_height = self._position[2]
+        table_depth = camera_height - self._table_height
+        depth_augmented = np.minimum(depth, table_depth)
+        return depth_augmented
 
 
 __all__ = ["Camera", "CameraNoiseModel"]

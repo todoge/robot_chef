@@ -115,7 +115,7 @@ class RobotChefSimulation:
         # Grasp execution parameters
         self.RECALIBRATE_HEIGHT = 0.55  # Height above for predicting grasp processing
         self.APPROACH_HEIGHT = 0.35  # Height above object for pre-grasp
-        self.GRASP_CLEARANCE = 0.13  # Clearance when grasping
+        self.GRASP_CLEARANCE = 0.08  # Clearance when grasping
         self.LIFT_HEIGHT = 0.35      # Height to lift object to
         self.FRAME_MARKER_URDF = os.path.join(os.path.dirname(os.path.realpath(__file__)), "env/frame_marker.urdf")
         self.eef_marker = p.loadURDF(self.FRAME_MARKER_URDF, [0, 0, 0], useFixedBase=True, globalScaling=0.18)
@@ -141,7 +141,7 @@ class RobotChefSimulation:
 
         # Create bowl and pan at configured poses (apply world yaw).
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
-        bowl_id, bowl_props = bowl_factory.create_rice_bowl(self.client_id, pose=bowl_pose)
+        bowl_id, bowl_props = bowl_factory.create_square_bowl(self.client_id, pose=bowl_pose)
         self.objects["bowl"] = {"body_id": bowl_id, "properties": bowl_props, "pose": bowl_pose}
         '''
         pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
@@ -398,7 +398,7 @@ class RobotChefSimulation:
       cam_pos, cam_orn = p.multiplyTransforms(cam_pos, cam_orn, forward_vec, [0, 0, 0, 1])
       cam_rpy_rad = p.getEulerFromQuaternion(cam_orn)
       cam_rpy_deg = np.degrees(cam_rpy_rad)
-      self.camera = Camera(self.client_id, cam_pos, cam_rpy_deg)
+      self.camera = Camera(self.client_id, cam_pos, cam_rpy_deg, self._get_table_top_z())
 
 
     def step_simulation(self, steps: int) -> None:
