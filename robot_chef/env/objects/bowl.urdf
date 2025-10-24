@@ -1,0 +1,151 @@
+<?xml version="1.0"?>
+<robot name="round_bowl">
+  
+  <!-- Base link (the bowl body) -->
+  <link name="base_link">
+    
+    <!-- Visual representation -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="round_bowl.obj" scale="1.0 1.0 1.0"/>
+      </geometry>
+      <material name="white">
+        <color rgba="0.95 0.95 0.95 1.0"/>
+      </material>
+    </visual>
+    
+    <!-- Collision geometry - simplified hollow cylinder approximation -->
+    <!-- Base disk -->
+    <collision name="base">
+      <origin xyz="0 0 0.003" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.07" length="0.006"/>
+      </geometry>
+    </collision>
+    
+    <!-- Outer wall segments (16 segments to approximate circle) -->
+    <collision name="wall_0">
+      <origin xyz="0.0615 0 0.028" rpy="0 0 0.19635"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_1">
+      <origin xyz="0.0532 0.0308 0.028" rpy="0 0 0.58905"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_2">
+      <origin xyz="0.0308 0.0532 0.028" rpy="0 0 0.98175"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_3">
+      <origin xyz="0 0.0615 0.028" rpy="0 0 1.37445"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_4">
+      <origin xyz="-0.0308 0.0532 0.028" rpy="0 0 1.76715"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_5">
+      <origin xyz="-0.0532 0.0308 0.028" rpy="0 0 2.15985"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_6">
+      <origin xyz="-0.0615 0 0.028" rpy="0 0 2.55255"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_7">
+      <origin xyz="-0.0532 -0.0308 0.028" rpy="0 0 2.94525"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_8">
+      <origin xyz="-0.0308 -0.0532 0.028" rpy="0 0 3.33795"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_9">
+      <origin xyz="0 -0.0615 0.028" rpy="0 0 3.73065"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_10">
+      <origin xyz="0.0308 -0.0532 0.028" rpy="0 0 4.12335"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_11">
+      <origin xyz="0.0532 -0.0308 0.028" rpy="0 0 4.51605"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_12">
+      <origin xyz="0.0615 0 0.028" rpy="0 0 4.90875"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_13">
+      <origin xyz="0.0532 0.0308 0.028" rpy="0 0 5.30145"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_14">
+      <origin xyz="0.0308 0.0532 0.028" rpy="0 0 5.69415"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <collision name="wall_15">
+      <origin xyz="0 0.0615 0.028" rpy="0 0 6.08685"/>
+      <geometry>
+        <box size="0.027 0.008 0.05"/>
+      </geometry>
+    </collision>
+    
+    <!-- Inertial properties -->
+    <inertial>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <mass value="0.4"/>
+      <inertia ixx="0.0003" ixy="0" ixz="0" 
+               iyy="0.0003" iyz="0" 
+               izz="0.0005"/>
+    </inertial>
+    
+  </link>
+  
+</robot>

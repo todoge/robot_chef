@@ -141,8 +141,15 @@ class RobotChefSimulation:
 
         # Create bowl and pan at configured poses (apply world yaw).
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
-        bowl_id, bowl_props = bowl_factory.create_square_bowl(self.client_id, pose=bowl_pose)
-        self.objects["bowl"] = {"body_id": bowl_id, "properties": bowl_props, "pose": bowl_pose}
+        print(f"Creating bowl at pose: {bowl_pose}")
+        bowl_id = bowl_factory.create_rounded_bowl(self.client_id, pose=bowl_pose)
+        print(f"Bowl created with body id: {bowl_id}")
+        aabb_min, aabb_max = p.getAABB(bowl_id, physicsClientId=self.client_id)
+        print(f"Bowl AABB min: {aabb_min}, max: {aabb_max}")
+        if "bowl" in self.objects:
+            p.removeBody(self.objects["bowl"]["body_id"], physicsClientId=self.client_id)
+            del self.objects["bowl"]
+        self.objects["bowl"] = {"body_id": bowl_id, "properties": None, "pose": bowl_pose}
         '''
         pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
         pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
@@ -198,7 +205,7 @@ class RobotChefSimulation:
         '''
         # --- Deterministic placement using AABBs ---
         z_table = self._get_table_top_z()
-
+        print(f"Placing bowl on support at Z={z_table}")
         # 1) Stove rests on TABLE
         #self._place_on_support(stove_id, support_top_z=z_table)
 
