@@ -35,6 +35,7 @@ def _matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, float]:
         y = (m[0, 2] - m[2, 0]) / s
         z = (m[1, 0] - m[0, 1]) / s
     else:
+        
         if m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
             s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
             w = (m[2, 1] - m[1, 2]) / s
@@ -180,6 +181,7 @@ class PourBowlIntoPanAndReturn:
         view_cfg = cfg.camera.get_active_view()
         noise_cfg = cfg.camera.noise
 
+        # Mount the camera in a fixed top-down oblique pose defined in the config
         self.camera = Camera(
             client_id=sim.client_id,
             view_xyz=view_cfg.xyz,
@@ -190,34 +192,14 @@ class PourBowlIntoPanAndReturn:
             resolution=view_cfg.resolution,
             noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob),
         )
+        self.camera.aim_at_world((cfg.bowl_pose.x, cfg.bowl_pose.y, cfg.bowl_pose.z))
 
-        # Choose closer arm to the bowl and mount the wrist camera there
-        bowl_pos_cfg = np.array([cfg.bowl_pose.x, cfg.bowl_pose.y, cfg.bowl_pose.z], dtype=float)
-        ls_left = p.getLinkState(sim.left_arm.body_id, sim.left_arm.ee_link, computeForwardKinematics=True, physicsClientId=sim.client_id)
-        ls_right = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, computeForwardKinematics=True, physicsClientId=sim.client_id)
-        d_left = float(np.linalg.norm(bowl_pos_cfg - np.asarray(ls_left[4], dtype=float)))
-        d_right = float(np.linalg.norm(bowl_pos_cfg - np.asarray(ls_right[4], dtype=float)))
-        use_left = d_left <= d_right
-        active = sim.left_arm if use_left else sim.right_arm
-        self.active_arm_name = "left" if use_left else "right"
-
-        rel_translation = (0.06, 0.0, 0.12)
-        rel_rpy_deg = (-10.0, -65.0, 0.0)
-        self.camera.mount_to_link(
-            parent_body_id=active.body_id,
-            parent_link_id=active.ee_link,
-            rel_xyz=rel_translation,
-            rel_rpy_deg=rel_rpy_deg,
-        )
-        
-        rel_quat = p.getQuaternionFromEuler([math.radians(v) for v in rel_rpy_deg])
-        rel_rot = np.array(p.getMatrixFromQuaternion(rel_quat), dtype=float).reshape(3, 3)
+        active = sim.left_arm
+        self.active_arm_name = "left"
         self._T_eef_cam = np.eye(4, dtype=float)
-        self._T_eef_cam[:3, :3] = rel_rot
-        self._T_eef_cam[:3, 3] = np.array(rel_translation, dtype=float)
-        self._T_cam_eef = np.linalg.inv(self._T_eef_cam)
+        self._T_cam_eef = np.eye(4, dtype=float)
 
-        LOGGER.info("Using %s arm and wrist camera", self.active_arm_name.upper())
+        LOGGER.info("Using %s arm with fixed oblique camera", self.active_arm_name.upper())
 
         self.controller = VisionRefineController(
             client_id=sim.client_id,
