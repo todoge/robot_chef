@@ -1,4 +1,4 @@
-"""Perception-in-the-loop pipeline for pouring with a wrist-mounted camera."""
+"""Perception-in-the-loop pipeline for pouring with a fixed external camera."""
 
 from __future__ import annotations
 
@@ -150,7 +150,7 @@ def _apply_world_yaw(pose: Pose6D, yaw_deg: float) -> Pose6D:
 # Task implementation
 
 class PourBowlIntoPanAndReturn:
-    """Perception-driven pouring task with a wrist-mounted camera."""
+    """Perception-driven pouring task with a fixed external camera."""
 
     def __init__(self) -> None:
         self.sim: Optional[RobotChefSimulation] = None
@@ -162,6 +162,7 @@ class PourBowlIntoPanAndReturn:
 
         self._T_eef_cam = np.eye(4, dtype=float)
         self._T_cam_eef = np.eye(4, dtype=float)
+        
         self._feature_points_world: Optional[np.ndarray] = None
         self._target_uv: Optional[np.ndarray] = None
         self._target_Z: Optional[np.ndarray] = None
@@ -181,7 +182,8 @@ class PourBowlIntoPanAndReturn:
         view_cfg = cfg.camera.get_active_view()
         noise_cfg = cfg.camera.noise
 
-        # Mount the camera in a fixed top-down oblique pose defined in the config
+        # --- Setup a FIXED camera ---
+        LOGGER.info("Setting up fixed camera view: '%s'", cfg.camera.active_view)
         self.camera = Camera(
             client_id=sim.client_id,
             view_xyz=view_cfg.xyz,
@@ -192,14 +194,14 @@ class PourBowlIntoPanAndReturn:
             resolution=view_cfg.resolution,
             noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob),
         )
-        self.camera.aim_at_world((cfg.bowl_pose.x, cfg.bowl_pose.y, cfg.bowl_pose.z))
+        
+        # NOTE: We now aim the camera in _run_perception() using the *snapped* pose
 
+        # Use the "left" arm for consistency
         active = sim.left_arm
         self.active_arm_name = "left"
         self._T_eef_cam = np.eye(4, dtype=float)
         self._T_cam_eef = np.eye(4, dtype=float)
-
-        LOGGER.info("Using %s arm with fixed oblique camera", self.active_arm_name.upper())
 
         self.controller = VisionRefineController(
             client_id=sim.client_id,
@@ -208,7 +210,7 @@ class PourBowlIntoPanAndReturn:
             arm_joints=active.joint_indices,
             dt=sim.dt,
             camera=self.camera,
-            handeye_T_cam_in_eef=self._T_cam_eef,
+            handeye_T_cam_in_eef=self._T_cam_eef, # Pass identity, it won't be used
             gripper_open=lambda width=0.08: sim.gripper_open(width=width, arm=self.active_arm_name),
             gripper_close=lambda force=60.0: sim.gripper_close(force=force, arm=self.active_arm_name),
         )
@@ -225,7 +227,7 @@ class PourBowlIntoPanAndReturn:
         self._pan_uid = int(pan_entry["body_id"])
 
     def plan(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
-        LOGGER.info("Planning completed (perception-driven execution).")
+        LOGGER.info("Planning completed (fixed camera, no IBVS).")
         return True
 
     def execute(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
@@ -236,9 +238,10 @@ class PourBowlIntoPanAndReturn:
             LOGGER.error("Bowl not found in simulation objects.")
             return False
 
+        # Run perception ONCE from the fixed location
         detection = self._run_perception(sim, cfg, bowl_entry)
         if detection is None:
-            LOGGER.error("Perception failed after sweeping the table.")
+            LOGGER.error("Perception failed from fixed camera pose.")
             self._metrics = {"transfer_ratio": 0.0, "in_pan": 0, "total": 0}
             return False
 
@@ -258,69 +261,33 @@ class PourBowlIntoPanAndReturn:
         cfg: PourTaskConfig,
         bowl_entry: Dict[str, object],
     ) -> Optional[Dict[str, object]]:
+        """
+        Captures a single detection from the fixed camera pose.
+        Aims camera at the correct, snapped pose first.
+        """
         assert self.camera is not None
         assert self.controller is not None
 
+        # Get the (now correct) snapped pose from the sim object
         bowl_pose: Pose6D = bowl_entry["pose"]
-        scan_waypoints = self._generate_scan_waypoints(sim, bowl_pose)
+        if bowl_pose is None:
+            LOGGER.error("Bowl pose is missing from simulation object entry.")
+            return None
+            
+        # Aim the camera at the correct, snapped pose RIGHT before capture
+        self.camera.aim_at_world(bowl_pose.position)
+        LOGGER.info(
+            "Aimed camera at final bowl pose: (%.3f, %.3f, %.3f)",
+            bowl_pose.x, bowl_pose.y, bowl_pose.z
+        )
 
-        attempt = 0
-        for cam_pos, cam_quat in scan_waypoints:
-            eef_pos, eef_quat = self._camera_to_eef_pose(cam_pos, cam_quat)
-            if not self.controller.move_waypoint(eef_pos, eef_quat):
-                LOGGER.warning("Skipping scan pose (IK failure).")
-                continue
-            attempt += 1
-            detection = self._capture_detection(sim, cfg, bowl_entry, bowl_pose, attempt)
-            if detection is not None:
-                return detection
+        LOGGER.info("Running perception from fixed camera.")
+        detection = self._capture_detection(sim, cfg, bowl_entry, bowl_pose, attempt=1)
+        if detection is not None:
+            return detection
+        
+        LOGGER.error("Failed to detect bowl rim from fixed camera.")
         return None
-
-    def _generate_scan_waypoints(self, sim: RobotChefSimulation, bowl_pose: Pose6D) -> List[Tuple[np.ndarray, Tuple[float, float, float, float]]]:
-        center = np.array([bowl_pose.x, bowl_pose.y, bowl_pose.z], dtype=float)
-        table_entry = sim.objects.get("table", {})
-        table_top = float(table_entry.get("top_z", bowl_pose.z - 0.05))
-        base_height = max(center[2] + 0.32, table_top + 0.35)
-
-        offsets = [
-            np.array([0.0, -0.28, 0.0], dtype=float),
-            np.array([0.24, -0.10, -0.04], dtype=float),
-            np.array([-0.24, -0.10, -0.04], dtype=float),
-            np.array([0.0, 0.28, 0.05], dtype=float),
-        ]
-
-        waypoints: List[Tuple[np.ndarray, Tuple[float, float, float, float]]] = []
-
-        # Top-down look
-        top_pos = np.array([center[0], center[1], base_height + 0.25], dtype=float)
-        top_rot = _camera_look_at(top_pos, center)
-        waypoints.append((top_pos, _matrix_to_quaternion(top_rot)))
-
-        for offset in offsets:
-            cam_pos = np.array(
-                [center[0] + offset[0], center[1] + offset[1], base_height + offset[2]],
-                dtype=float,
-            )
-            cam_rot = _camera_look_at(cam_pos, center)
-            waypoints.append((cam_pos, _matrix_to_quaternion(cam_rot)))
-
-        # Table sweep along X axis
-        sweep_y = center[1] - 0.35
-        for x in np.linspace(center[0] - 0.35, center[0] + 0.35, 5):
-            cam_pos = np.array([x, sweep_y, base_height + 0.08], dtype=float)
-            cam_rot = _camera_look_at(cam_pos, center)
-            waypoints.append((cam_pos, _matrix_to_quaternion(cam_rot)))
-        return waypoints
-
-    def _camera_to_eef_pose(self, cam_pos: np.ndarray, cam_quat: Tuple[float, float, float, float]) -> Tuple[np.ndarray, np.ndarray]:
-        R_cam = np.array(p.getMatrixFromQuaternion(cam_quat), dtype=float).reshape(3, 3)
-        T_cam = np.eye(4, dtype=float)
-        T_cam[:3, :3] = R_cam
-        T_cam[:3, 3] = cam_pos
-        T_eef = T_cam @ self._T_cam_eef
-        pos = T_eef[:3, 3]
-        quat = _matrix_to_quaternion(T_eef[:3, :3])
-        return pos.astype(float), np.array(quat, dtype=float)
 
     def _capture_detection(
         self,
@@ -338,7 +305,7 @@ class PourBowlIntoPanAndReturn:
 
         cam_pose = self.camera.world_from_camera[:3, 3]
         LOGGER.info(
-            "Camera positioned at (%.3f, %.3f, %.3f) aiming at (%.3f, %.3f, %.3f)",
+            "Camera at (%.3f, %.3f, %.3f) looking at bowl (%.3f, %.3f, %.3f)",
             cam_pose[0],
             cam_pose[1],
             cam_pose[2],
@@ -385,14 +352,19 @@ class PourBowlIntoPanAndReturn:
             u, v = int(round(uv[0])), int(round(uv[1]))
             if 0 <= v < overlay.shape[0] and 0 <= u < overlay.shape[1]:
                 overlay[max(0, v - 2) : min(overlay.shape[0], v + 3), max(0, u - 2) : min(overlay.shape[1], u + 3)] = [255, 64, 64]
-        _write_png(Path(f"attempt{attempt:02d}_overlay.png"), overlay)
+        
+        # Save overlay to the CWD
+        out_path = Path(f"attempt{attempt:02d}_overlay.png")
+        _write_png(out_path, overlay)
+        LOGGER.info("Saved detection overlay to %s", out_path.absolute())
+
 
         LOGGER.info(
-            "Detected rim: pts>=200, candidates>=8 (found %d pts, %d candidates)",
+            "Detected rim: pts=%d, candidates=%d",
             rim_pts.shape[0],
             len(candidates),
         )
-
+        
         feature_pts_world = np.asarray(detection["features_px"]["points_world"], dtype=float)
         self._feature_points_world = feature_pts_world
         self._target_uv = np.asarray(detection["features_px"]["uv_pair"], dtype=float)
@@ -410,13 +382,15 @@ class PourBowlIntoPanAndReturn:
     ) -> bool:
         assert self.controller is not None
         assert self.camera is not None
-        if self._feature_points_world is None or self._target_uv is None or self._target_Z is None:
-            LOGGER.error("IBVS feature targets not prepared.")
-            return False
 
         candidates = sorted(detection["grasp_candidates"], key=lambda c: c.get("quality", 0.0), reverse=True)
-        target_uv = np.asarray(self._target_uv, dtype=float).reshape(-1, 2)
-        target_Z = np.asarray(self._target_Z, dtype=float).reshape(-1)
+        if not candidates:
+            LOGGER.error("No grasp candidates found in detection.")
+            return False
+
+        # Define a threshold for successful grasp.
+        # The bowl wall is ~8mm thick. 5mm is a safe threshold.
+        MIN_GRASP_WIDTH = 0.005 # 5mm
 
         for idx, candidate in enumerate(candidates[:3]):
             LOGGER.info("Attempting grasp candidate %d with quality %.2f", idx + 1, candidate["quality"])
@@ -424,63 +398,69 @@ class PourBowlIntoPanAndReturn:
             quat = np.array(candidate["pose_world"]["quaternion"], dtype=float)
             clearance = cfg.perception.grasp_clearance_m
 
+            # 1. Move to pre-grasp (Offset in World Z)
             pregrasp = position.copy()
-            pregrasp[2] += clearance + 0.08
+            pregrasp[2] += clearance + 0.08 # Simple World Z offset
+            
+            self.controller.open_gripper()
             if not self.controller.move_waypoint(pregrasp, quat):
                 LOGGER.warning("Failed to reach pre-grasp waypoint.")
                 continue
 
+            # 2. Move to approach (Offset in World Z)
             approach = position.copy()
-            approach[2] += clearance
+            approach[2] += clearance # Simple World Z offset
             if not self.controller.move_waypoint(approach, quat):
                 LOGGER.warning("Failed to reach approach waypoint.")
                 continue
 
-            self.controller.open_gripper()
+            # 3. --- IBVS is Skipped ---
+            LOGGER.info("Skipping IBVS refinement (using fixed camera).")
 
-            feature_points_world = self._feature_points_world
-
-            def get_features() -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-                _, _, _, _ = self.camera.get_rgbd()
-                uv_meas, Z_meas = _project_world_points(
-                    feature_points_world,
-                    self.camera.camera_from_world,
-                    self.camera.intrinsics,
-                )
-                return uv_meas, Z_meas
-
-            refinement_ok = self.controller.refine_to_features_ibvs(
-                get_features=get_features,
-                target_uv=target_uv,
-                target_Z=target_Z,
-                pixel_tol=cfg.perception.grasp_clearance_m * 100.0,
-                depth_tol=0.01,
-                max_time_s=4.0,
-                gain=0.35,
-                max_joint_vel=0.45,
-            )
-            if not refinement_ok:
-                LOGGER.warning("IBVS refinement failed for candidate %d", idx + 1)
-                continue
-
+            # 4. Move to final grasp pose (Offset in World Z)
             grasp_pose = position.copy()
             grasp_pose[2] += max(0.0, getattr(cfg.perception, "rim_thickness_m", 0.006) * 0.5)
             if not self.controller.move_waypoint(grasp_pose, quat):
                 LOGGER.warning("Could not descend to final grasp pose.")
                 continue
 
+            # 5. Grasp and VERIFY
             self.controller.close_gripper()
-            sim.step_simulation(steps=120)
+            sim.step_simulation(steps=120) # Wait for grasp to settle
 
+            # --- Grasp verification (Force Closure Check) ---
+            current_width = sim.get_gripper_width(arm=self.active_arm_name)
+            
+            if current_width < MIN_GRASP_WIDTH:
+                LOGGER.warning(
+                    "Grasp verification FAILED for candidate %d (width %.4f m < %.4f m). Retrying.",
+                    idx + 1, current_width, MIN_GRASP_WIDTH
+                )
+                # Open gripper and back away before trying next candidate
+                self.controller.open_gripper()
+                self.controller.move_waypoint(pregrasp, quat) # Move back to pregrasp
+                continue # Try next candidate
+            
+            LOGGER.info(
+                "Grasp verification SUCCEEDED for candidate %d (width %.4f m).",
+                idx + 1, current_width
+            )
+            # --- END Grasp verification ---
+
+            # 6. Lift (Offset in World Z)
             lift_pose = grasp_pose.copy()
-            lift_pose[2] += 0.12
+            lift_pose[2] += 0.35 # Simple World Z offset
             self.controller.move_waypoint(lift_pose, quat)
 
-            pan_pose_world: Pose6D = sim.objects["pan"]["pose"]
-            pan_quat = _pose_to_quaternion(pan_pose_world)
-            above_pan = np.array([pan_pose_world.x, pan_pose_world.y, pan_pose_world.z + 0.25], dtype=float)
+            # 7. Move to Pan and Pour
+            
+            # Get pan pose from simulation (it's already yawed)
+            pan_pose_sim: Pose6D = sim.objects["pan"]["pose"]
+            pan_quat = _pose_to_quaternion(pan_pose_sim)
+            above_pan = np.array([pan_pose_sim.x, pan_pose_sim.y, pan_pose_sim.z + 0.25], dtype=float)
             self.controller.move_waypoint(above_pan, pan_quat)
 
+            # Get pour pose from config (MUST be yawed)
             pan_pour_pose = _apply_world_yaw(cfg.pan_pour_pose, cfg.scene.world_yaw_deg)
             pour_quat = p.getQuaternionFromEuler([pan_pour_pose.roll, pan_pour_pose.pitch, pan_pour_pose.yaw])
             pour_pos = np.array([pan_pour_pose.x, pan_pour_pose.y, pan_pour_pose.z], dtype=float)
@@ -490,16 +470,25 @@ class PourBowlIntoPanAndReturn:
             for _ in range(hold_steps):
                 sim.step_simulation(steps=1)
 
-            above_bowl = lift_pose.copy()
-            self.controller.move_waypoint(above_bowl, quat)
+            # 8. Return bowl
+            self.controller.move_waypoint(lift_pose, quat) # Use the same lift pose
+            
             place_pose = grasp_pose.copy()
-            place_pose[2] += clearance + 0.03
+            place_pose[2] += clearance + 0.03 # Simple World Z offset
             self.controller.move_waypoint(place_pose, quat)
+            
             self.controller.open_gripper()
             sim.step_simulation(steps=60)
-            return True
+            
+            # Lift arm up after placing
+            lift_pose[2] += 0.3 # Even higher
+            self.controller.move_waypoint(lift_pose, quat)
+            
+            LOGGER.info("Grasp and pour sequence successful.")
+            return True # <-- Note: We return True inside the loop on success
 
-        LOGGER.error("All grasp candidates failed.")
+        # If we exit the loop, all candidates failed verification
+        LOGGER.error("All grasp candidates failed (or failed verification).")
         return False
 
 

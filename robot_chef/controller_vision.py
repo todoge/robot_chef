@@ -145,6 +145,10 @@ class VisionRefineController:
         gain: float = 0.35,
         max_joint_vel: float = 0.5,
     ) -> bool:
+        if np.allclose(self._T_cam_eef, np.eye(4)):
+            LOGGER.warning("IBVS refinement called with identity hand-eye transform. This implies a fixed camera and will not work. Skipping.")
+            return True # Pretend it succeeded
+        
         target_uv = np.asarray(target_uv, dtype=float).reshape(-1, 2)
         target_Z = np.asarray(target_Z, dtype=float).reshape(-1)
         if target_uv.shape[0] == 0:

@@ -99,6 +99,16 @@ class RobotChefSimulation:
     # ------------------------------------------------------------------ #
     # Environment & robot helpers
 
+    def get_gripper_width(self, arm: Optional[str] = None) -> float:
+        """Get the current distance between the two gripper fingers."""
+        arm_state = self._get_arm(arm)
+        j1 = arm_state.finger_joints[0]
+        j2 = arm_state.finger_joints[1]
+        s1 = p.getJointState(arm_state.body_id, j1, physicsClientId=self.client_id)
+        s2 = p.getJointState(arm_state.body_id, j2, physicsClientId=self.client_id)
+        width = float(s1[0]) + float(s2[0])  # Each joint is half the width
+        return width
+    
     def _setup_environment(self) -> None:
         LOGGER.info("Setting up environment objects")
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
@@ -187,6 +197,20 @@ class RobotChefSimulation:
 
         # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
+        
+        # Refresh stored poses after snapping so they are not stale
+        self._update_object_pose("bowl")
+        self._update_object_pose("pan")
+        self._update_object_pose("stove_block")
+        
+        LOGGER.info(
+            "Final snapped bowl pose: %s",
+             self.objects.get("bowl", {}).get("pose")
+        )
+        LOGGER.info(
+            "Final snapped pan pose: %s",
+             self.objects.get("pan", {}).get("pose")
+        )
 
         # Expose pan base height after snapping (useful for later metrics).
         pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
@@ -531,4 +555,30 @@ class RobotChefSimulation:
         self._place_on_support(body_id, support_top_z=z_table)
 
 
+    def _update_object_pose(self, object_name: str) -> Optional[Pose6D]:
+        """Reads the current pose from sim and updates self.objects."""
+        if object_name not in self.objects:
+            LOGGER.warning("Cannot update pose for unknown object: %s", object_name)
+            return None
+        
+        entry = self.objects[object_name]
+        body_id = entry.get("body_id")
+        if body_id is None:
+            return None
+            
+        try:
+            pos, orn = p.getBasePositionAndOrientation(body_id, physicsClientId=self.client_id)
+            rpy = p.getEulerFromQuaternion(orn, physicsClientId=self.client_id)
+            
+            updated_pose = Pose6D(
+                x=float(pos[0]), y=float(pos[1]), z=float(pos[2]),
+                roll=float(rpy[0]), pitch=float(rpy[1]), yaw=float(rpy[2])
+            )
+            
+            entry["pose"] = updated_pose
+            return updated_pose
+        except p.error:
+            LOGGER.warning("PyBullet error reading pose for object: %s", object_name)
+            return None
+        
 __all__ = ["RobotChefSimulation", "ArmState"]

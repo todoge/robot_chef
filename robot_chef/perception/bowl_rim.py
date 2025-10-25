@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pybullet as p
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, float]:
@@ -93,6 +96,9 @@ def detect_bowl_rim(
     perception_cfg = seg.get("perception_cfg", None)
     bowl_props = seg.get("bowl_properties", {})
     bowl_pose = seg.get("bowl_pose", None)
+    
+    LOGGER.debug("JUNSIANG DEBUG: bowl_pose = %s", bowl_pose)
+    
     if bowl_pose is None:
         raise ValueError("seg must include 'bowl_pose'")
     seg_mask = seg.get("segmentation", None)
@@ -184,45 +190,50 @@ def detect_bowl_rim(
     grasp_candidates: List[Dict[str, object]] = []
     sample_count = int(getattr(perception_cfg, "rim_sample_count", 24) if perception_cfg else 24)
     bowl_origin = np.array([bowl_pose.x, bowl_pose.y, bowl_pose.z], dtype=float)
+    
+    # --- BEGIN CORRECTED GRASP FRAME (v4) ---
     for ang in np.linspace(0.0, 2.0 * math.pi, max(sample_count, 8), endpoint=False):
+        # Local vectors
         radial_local = np.array([math.cos(ang), math.sin(ang), 0.0], dtype=float)
         tangent_local = np.array([-math.sin(ang), math.cos(ang), 0.0], dtype=float)
+
+        # World vectors
+        R_wb = np.array(p.getMatrixFromQuaternion(p.getQuaternionFromEuler(bowl_pose.orientation_rpy)), dtype=float).reshape(3, 3)
         grasp_local = np.array(
             [
                 radius_est * radial_local[0],
                 radius_est * radial_local[1],
-                inner_height + rim_thickness,
+                inner_height + rim_thickness, # Grasp slightly above the rim
             ],
             dtype=float,
         )
         grasp_world = bowl_origin + R_wb @ grasp_local
-        radial_world = R_wb @ radial_local
         tangent_world = R_wb @ tangent_local
 
-        z_axis = -radial_world
-        z_norm = np.linalg.norm(z_axis)
-        if z_norm < 1e-6:
-            continue
-        z_axis /= z_norm
+        # --- Define Panda Gripper Frame ---
+        # We want a TOP-DOWN grasp.
+        # z_axis (approach) is straight down
+        z_axis = np.array([0.0, 0.0, -1.0], dtype=float)
 
+        # x_axis (one finger) is tangent to the rim
         x_axis = tangent_world
-        x_norm = np.linalg.norm(x_axis)
-        if x_norm < 1e-6:
-            continue
-        x_axis /= x_norm
-
+        if np.linalg.norm(x_axis) < 1e-6: continue
+        x_axis[2] = 0.0 # Project to XY plane
+        if np.linalg.norm(x_axis) < 1e-6: continue # Avoid zero vector if tangent is vertical
+        x_axis /= np.linalg.norm(x_axis)
+        
+        # y_axis (other finger) is orthogonal
         y_axis = np.cross(z_axis, x_axis)
-        y_norm = np.linalg.norm(y_axis)
-        if y_norm < 1e-6:
-            continue
-        y_axis /= y_norm
-
-        # Re-orthogonalise x_axis in case of numerical drift
+        y_axis /= np.linalg.norm(y_axis)
+        
+        # Re-orthogonalise x_axis
         x_axis = np.cross(y_axis, z_axis)
         x_axis /= np.linalg.norm(x_axis)
 
+        # Re-build rotation matrix (Column-major)
         R_world = np.column_stack([x_axis, y_axis, z_axis])
         quat = _matrix_to_quaternion(R_world)
+        
         quality = float(np.clip(0.95 - 0.1 * abs(math.sin(ang * 2.0)), 0.0, 1.0))
         grasp_candidates.append(
             {
@@ -233,6 +244,7 @@ def detect_bowl_rim(
                 "quality": quality,
             }
         )
+    # --- END CORRECTED GRASP FRAME (v4) ---
 
     result = {
         "rim_pts_3d": rim_points_world.astype(np.float32),
