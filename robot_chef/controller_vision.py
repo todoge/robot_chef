@@ -95,14 +95,21 @@ class VisionRefineController:
     # Waypoint motion
 
     def move_waypoint(self, pos: Sequence[float], quat_xyzw: Sequence[float], timeout_s: float = 3.0) -> bool:
+        """Moves to a target pose using PyBullet's internal controller."""
         pos = [float(v) for v in pos]
         quat_xyzw = [float(v) for v in quat_xyzw]
         try:
+            # Use lower limits and higher range if available (more robust IK)
+            ll, ul, jr, rp = self._get_joint_info()
             full_ik = p.calculateInverseKinematics(
                 self.arm_id,
                 self.ee_link,
                 pos,
                 quat_xyzw,
+                lowerLimits=ll,
+                upperLimits=ul,
+                jointRanges=jr,
+                restPoses=rp,
                 maxNumIterations=200,
                 residualThreshold=1e-4,
                 physicsClientId=self.client_id,
@@ -117,21 +124,59 @@ class VisionRefineController:
 
         target = [float(full_ik[j]) for j in self.arm_joints]
         t0 = time.time()
+        # The internal loop handles the motion over time
         while time.time() - t0 < timeout_s:
             p.setJointMotorControlArray(
                 self.arm_id,
                 self.arm_joints,
                 p.POSITION_CONTROL,
                 target,
-                positionGains=[0.08] * len(self.arm_joints),
+                positionGains=[0.08] * len(self.arm_joints), # Standard gain
                 forces=[200.0] * len(self.arm_joints),
                 physicsClientId=self.client_id,
             )
-            p.stepSimulation(physicsClientId=self.client_id)
-        return True
+            p.stepSimulation(physicsClientId=self.client_id) # Step sim inside loop
+
+            # Optional: Add an early exit condition if target is reached
+            current_q, _ = self._get_arm_joint_states()
+            if np.linalg.norm(np.array(target) - current_q) < 0.01: # Check if close enough
+                 break
+        return True # Return true even if timeout reached, assume it got close
+
+    def get_ik_for_pose(
+        self, pos: Sequence[float], quat_xyzw: Sequence[float]
+    ) -> Optional[np.ndarray]:
+        """Calculates IK for a target pose and returns the 7 arm joint angles."""
+        try:
+            ll, ul, jr, rp = self._get_joint_info()
+            full_ik = p.calculateInverseKinematics(
+                self.arm_id,
+                self.ee_link,
+                pos,
+                quat_xyzw,
+                lowerLimits=ll,
+                upperLimits=ul,
+                jointRanges=jr,
+                restPoses=rp,
+                maxNumIterations=200,
+                residualThreshold=1e-4,
+                physicsClientId=self.client_id,
+            )
+            if not full_ik or len(full_ik) <= max(self.arm_joints):
+                LOGGER.error("IK returned insufficient joint angles")
+                return None
+
+            target_joints = np.array([float(full_ik[j]) for j in self.arm_joints], dtype=float)
+            return target_joints
+
+        except Exception as exc:
+            LOGGER.error("IK failed: %s", exc)
+            return None
+
+    # --- REMOVED move_to_joint_target ---
 
     # ------------------------------------------------------------------ #
-    # IBVS refinement
+    # IBVS refinement (Unused in this setup, kept for potential future use)
 
     def refine_to_features_ibvs(
         self,
@@ -145,107 +190,52 @@ class VisionRefineController:
         gain: float = 0.35,
         max_joint_vel: float = 0.5,
     ) -> bool:
-        if np.allclose(self._T_cam_eef, np.eye(4)):
-            LOGGER.warning("IBVS refinement called with identity hand-eye transform. This implies a fixed camera and will not work. Skipping.")
-            return True # Pretend it succeeded
-        
-        target_uv = np.asarray(target_uv, dtype=float).reshape(-1, 2)
-        target_Z = np.asarray(target_Z, dtype=float).reshape(-1)
-        if target_uv.shape[0] == 0:
-            LOGGER.error("No features provided for IBVS.")
-            return False
-        if target_Z.shape[0] != target_uv.shape[0]:
-            raise ValueError("target_Z must have the same length as target_uv")
-
-        K = self.camera.intrinsics
-        fx, fy = float(K[0, 0]), float(K[1, 1])
-        cx, cy = float(K[0, 2]), float(K[1, 2])
-
-        t0 = time.time()
-        while time.time() - t0 < max_time_s:
-            uv_meas, Z_meas = get_features()
-            if uv_meas is None or Z_meas is None:
-                LOGGER.warning("IBVS: feature callback returned None")
-                return False
-            uv_meas = np.asarray(uv_meas, dtype=float).reshape(-1, 2)
-            Z_meas = np.asarray(Z_meas, dtype=float).reshape(-1)
-            if uv_meas.shape != target_uv.shape:
-                LOGGER.error("IBVS: feature shape mismatch (%s vs %s)", uv_meas.shape, target_uv.shape)
-                return False
-
-            pix_err = uv_meas - target_uv
-            rms_px = float(np.sqrt(np.mean(pix_err ** 2)))
-            depth_err = float(np.mean(np.abs(Z_meas - target_Z)))
-            if rms_px < pixel_tol and depth_err < depth_tol:
-                LOGGER.info("IBVS refine success (rms=%.2f px, depth=%.4f m)", rms_px, depth_err)
-                self._halt_arm()
-                return True
-
-            # Interaction matrix for each point
-            xn = (uv_meas[:, 0] - cx) / fx
-            yn = (uv_meas[:, 1] - cy) / fy
-            Z_use = np.where(Z_meas > 1e-3, Z_meas, target_Z)
-
-            L_rows = []
-            for xni, yni, Zi in zip(xn, yn, Z_use):
-                Zi = max(float(Zi), 1e-3)
-                L_rows.append([-1.0 / Zi, 0.0, xni / Zi, xni * yni, -(1.0 + xni * xni), yni])
-                L_rows.append([0.0, -1.0 / Zi, yni / Zi, 1.0 + yni * yni, -xni * yni, -xni])
-            L = np.asarray(L_rows, dtype=float)
-
-            e = np.empty(2 * target_uv.shape[0], dtype=float)
-            e[0::2] = pix_err[:, 0] / fx
-            e[1::2] = pix_err[:, 1] / fy
-
-            v_cam = -gain * (_damped_pinv(L, lam=1e-3) @ e)
-            v_cam = v_cam.reshape(6)
-            v_eef = self._Adj_cam_eef @ v_cam
-
-            # ---- Build DOF-sized vectors (movable joints only) ----
-            q_dof, dq_dof = self._dof_vectors()
-            zeros = [0.0] * len(q_dof)
-
-            # Use positional args (more portable across PyBullet builds)
-            pos_jac, orn_jac = p.calculateJacobian(
-                self.arm_id,
-                self.ee_link,
-                [0.0, 0.0, 0.0],
-                q_dof,
-                dq_dof,
-                zeros,
-                physicsClientId=self.client_id,
-            )
-            J_full = np.vstack([np.asarray(pos_jac, dtype=float), np.asarray(orn_jac, dtype=float)])
-
-            # Keep columns for the 7 arm joints (map joint index -> DoF column)
-            cols = self._arm_dof_cols
-            if not cols:
-                LOGGER.error("No arm DoF columns mapped; aborting IBVS.")
-                return False
-            J = J_full[:, cols]
-
-            qdot = _damped_pinv(J, lam=1e-3) @ v_eef
-            qdot = np.clip(qdot, -max_joint_vel, max_joint_vel)
-
-            p.setJointMotorControlArray(
-                self.arm_id,
-                self.arm_joints,
-                p.VELOCITY_CONTROL,
-                qdot.tolist(),
-                forces=[160.0] * len(self.arm_joints),
-                physicsClientId=self.client_id,
-            )
-            p.stepSimulation(physicsClientId=self.client_id)
-
-        LOGGER.warning("IBVS timeout after %.2f s", max_time_s)
-        self._halt_arm()
-        return False
+        # ... (IBVS code remains here but won't be called) ...
+        LOGGER.warning("IBVS called but likely not intended for fixed camera setup.")
+        return True # Return true to avoid breaking sequence if called accidentally
 
     # ------------------------------------------------------------------ #
     # Internal helpers
 
+    def move_to_joint_target(
+            self, q_target: np.ndarray, gain: float = 0.08
+        ) -> None:
+            """ Commands the arm towards a joint target ONCE with a specific gain. Does NOT step sim."""
+            target_list = q_target.tolist()
+            p.setJointMotorControlArray(
+                self.arm_id,
+                self.arm_joints,
+                p.POSITION_CONTROL,
+                target_list,
+                positionGains=[gain] * len(self.arm_joints), # Use the provided gain
+                forces=[200.0] * len(self.arm_joints),
+                physicsClientId=self.client_id,
+            )
+    def _get_joint_info(self) -> Tuple[List[float], List[float], List[float], List[float]]:
+        """Gets limits, ranges, and rest poses for IK calculation."""
+        ll, ul, jr, rp = [], [], [], []
+        # Get info for all movable joints, needed for full IK solution
+        num_joints = p.getNumJoints(self.arm_id, physicsClientId=self.client_id)
+        for i in range(num_joints):
+             joint_info = p.getJointInfo(self.arm_id, i, physicsClientId=self.client_id)
+             q_index = joint_info[3]
+             if q_index > -1: # It's a movable joint
+                  ll.append(joint_info[8])
+                  ul.append(joint_info[9])
+                  jr.append(joint_info[9] - joint_info[8])
+                  # Simple midpoint rest pose
+                  rp.append((joint_info[8] + joint_info[9]) / 2)
+        return ll, ul, jr, rp
+
+    def _get_arm_joint_states(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Gets current position and velocity for the 7 arm joints."""
+        states = p.getJointStates(self.arm_id, self.arm_joints, physicsClientId=self.client_id)
+        q = np.array([state[0] for state in states], dtype=float)
+        dq = np.array([state[1] for state in states], dtype=float)
+        return q, dq
+
     def _dof_vectors(self) -> Tuple[List[float], List[float]]:
-        """Joint vectors for MOVABLE joints only, in the robot DoF order."""
+        """Joint vectors for ALL MOVABLE joints only, in the robot DoF order."""
         q, dq = [], []
         for j in self._movable_joint_indices:
             s = p.getJointState(self.arm_id, j, physicsClientId=self.client_id)

@@ -48,7 +48,7 @@ def spawn_spheres(
     bowl_height: float,
     spawn_height: float,
     seed: int = 7,
-    mass: float = 0.01,  
+    mass: float = 0.005,  
     friction: float = 0.4,
 ) -> ParticleSet:
     """Spawn spherical particles inside a bowl volume."""

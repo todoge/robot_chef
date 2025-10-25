@@ -6,6 +6,7 @@ import logging
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+import time # For pauses
 
 import numpy as np
 import pybullet as p
@@ -14,7 +15,7 @@ import zlib
 
 from ..camera import Camera, CameraNoiseModel
 from ..config import Pose6D, PourTaskConfig
-from ..controller_vision import VisionRefineController
+from ..controller_vision import VisionRefineController # Keep using this for IK and moves
 from ..perception.bowl_rim import detect_bowl_rim
 from ..simulation import RobotChefSimulation
 
@@ -22,474 +23,286 @@ LOGGER = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
-# Small geometry helpers
-
+# Small geometry helpers (Unchanged)
+# ... (Assume _matrix_to_quaternion, _write_png, _pose_to_quaternion, _apply_world_yaw are correct) ...
 def _matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, float]:
-    """Convert a rotation matrix into a quaternion (x, y, z, w)."""
     m = R
     trace = float(m[0, 0] + m[1, 1] + m[2, 2])
     if trace > 0.0:
-        s = math.sqrt(trace + 1.0) * 2.0
-        w = 0.25 * s
-        x = (m[2, 1] - m[1, 2]) / s
-        y = (m[0, 2] - m[2, 0]) / s
-        z = (m[1, 0] - m[0, 1]) / s
+        s = math.sqrt(trace + 1.0) * 2.0; w = 0.25 * s
+        x = (m[2, 1] - m[1, 2]) / s; y = (m[0, 2] - m[2, 0]) / s; z = (m[1, 0] - m[0, 1]) / s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+        w = (m[2, 1] - m[1, 2]) / s; x = 0.25 * s
+        y = (m[0, 1] + m[1, 0]) / s; z = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+        w = (m[0, 2] - m[2, 0]) / s; y = 0.25 * s
+        x = (m[0, 1] + m[1, 0]) / s; z = (m[1, 2] + m[2, 1]) / s
     else:
-        
-        if m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
-            s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
-            w = (m[2, 1] - m[1, 2]) / s
-            x = 0.25 * s
-            y = (m[0, 1] + m[1, 0]) / s
-            z = (m[0, 2] + m[2, 0]) / s
-        elif m[1, 1] > m[2, 2]:
-            s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
-            w = (m[0, 2] - m[2, 0]) / s
-            x = (m[0, 1] + m[1, 0]) / s
-            y = 0.25 * s
-            z = (m[1, 2] + m[2, 1]) / s
-        else:
-            s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
-            w = (m[1, 0] - m[0, 1]) / s
-            x = (m[0, 2] + m[2, 0]) / s
-            y = (m[1, 2] + m[2, 1]) / s
-            z = 0.25 * s
-    quat = np.array([x, y, z, w], dtype=float)
-    quat /= np.linalg.norm(quat)
+        s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+        w = (m[1, 0] - m[0, 1]) / s; z = 0.25 * s
+        x = (m[0, 2] + m[2, 0]) / s; y = (m[1, 2] + m[2, 1]) / s
+    quat = np.array([x, y, z, w], dtype=float); quat /= np.linalg.norm(quat)
     return tuple(float(v) for v in quat)
 
-
-def _camera_look_at(camera_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
-    """Return world rotation matrix that points camera +Z axis at target."""
-    forward = target_pos - camera_pos
-    norm = np.linalg.norm(forward)
-    if norm < 1e-8:
-        forward = np.array([0.0, 0.0, 1.0], dtype=float)
-    else:
-        forward /= norm
-    z_cam = forward
-    up_guess = np.array([0.0, 1.0, 0.0], dtype=float)
-    x_cam = np.cross(up_guess, z_cam)
-    if np.linalg.norm(x_cam) < 1e-6:
-        up_guess = np.array([1.0, 0.0, 0.0], dtype=float)
-        x_cam = np.cross(up_guess, z_cam)
-    x_cam /= np.linalg.norm(x_cam)
-    y_cam = np.cross(z_cam, x_cam)
-    return np.column_stack([x_cam, y_cam, z_cam])
-
-
-def _project_world_points(points: np.ndarray, camera_from_world: np.ndarray, K: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Project 3D world points into pixels using the camera extrinsics."""
-    pts_world = np.asarray(points, dtype=float)
-    if pts_world.ndim != 2 or pts_world.shape[1] != 3:
-        raise ValueError("points must be shaped (N, 3)")
-    homog = np.concatenate([pts_world, np.ones((pts_world.shape[0], 1), dtype=float)], axis=1)
-    cam = (camera_from_world @ homog.T).T
-    z = cam[:, 2]
-    if np.any(z <= 1e-4):
-        return None, None
-    x = cam[:, 0] / z
-    y = cam[:, 1] / z
-    fx, fy = float(K[0, 0]), float(K[1, 1])
-    cx, cy = float(K[0, 2]), float(K[1, 2])
-    u = fx * x + cx
-    v = fy * y + cy
-    uv = np.stack([u, v], axis=1)
-    return uv.astype(float), z.astype(float)
-
-
 def _write_png(path: Path, image: np.ndarray) -> None:
-    """Write an RGB image to disk without external dependencies."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    img = image
-    if img.dtype != np.uint8:
-        img = np.clip(img, 0, 255).astype(np.uint8)
-    h, w, c = img.shape
-    if c != 3:
-        raise ValueError("Overlay writer expects RGB images")
-    raw = bytearray()
-    for row in img:
-        raw.append(0)
-        raw.extend(row.tobytes())
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    img = image;
+    if img.dtype != np.uint8: img = np.clip(img, 0, 255).astype(np.uint8)
+    h, w, c = img.shape;
+    if c != 3: raise ValueError("Overlay writer expects RGB images")
+    raw = bytearray();
+    for row in img: raw.append(0); raw.extend(row.tobytes())
     compressed = zlib.compress(bytes(raw), level=6)
-
     def chunk(tag: bytes, data: bytes) -> bytes:
         crc = zlib.crc32(tag + data) & 0xFFFFFFFF
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
-
     with path.open("wb") as fh:
         fh.write(b"\x89PNG\r\n\x1a\n")
         ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-        fh.write(chunk(b"IHDR", ihdr))
-        fh.write(chunk(b"IDAT", compressed))
-        fh.write(chunk(b"IEND", b""))
-
+        fh.write(chunk(b"IHDR", ihdr)); fh.write(chunk(b"IDAT", compressed)); fh.write(chunk(b"IEND", b""))
 
 def _pose_to_quaternion(pose: Pose6D) -> Tuple[float, float, float, float]:
     return p.getQuaternionFromEuler([pose.roll, pose.pitch, pose.yaw])
 
-
 def _apply_world_yaw(pose: Pose6D, yaw_deg: float) -> Pose6D:
-    yaw = math.radians(yaw_deg)
-    cos_y = math.cos(yaw)
-    sin_y = math.sin(yaw)
-    x = pose.x * cos_y - pose.y * sin_y
-    y = pose.x * sin_y + pose.y * cos_y
-    return Pose6D(
-        x=x,
-        y=y,
-        z=pose.z,
-        roll=pose.roll,
-        pitch=pose.pitch,
-        yaw=pose.yaw + yaw,
-    )
-
-
+    yaw = math.radians(yaw_deg); cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+    x = pose.x * cos_y - pose.y * sin_y; y = pose.x * sin_y + pose.y * cos_y
+    return Pose6D(x=x, y=y, z=pose.z, roll=pose.roll, pitch=pose.pitch, yaw=pose.yaw + yaw)
 # --------------------------------------------------------------------------- #
-# Task implementation
 
 class PourBowlIntoPanAndReturn:
-    """Perception-driven pouring task with a fixed external camera."""
+    """Reworked pouring task focusing on pour location and smoothness."""
 
     def __init__(self) -> None:
         self.sim: Optional[RobotChefSimulation] = None
         self.cfg: Optional[PourTaskConfig] = None
-
         self.camera: Optional[Camera] = None
         self.controller: Optional[VisionRefineController] = None
-        self.active_arm_name: str = "right"
-
-        self._T_eef_cam = np.eye(4, dtype=float)
-        self._T_cam_eef = np.eye(4, dtype=float)
-        
-        self._feature_points_world: Optional[np.ndarray] = None
-        self._target_uv: Optional[np.ndarray] = None
-        self._target_Z: Optional[np.ndarray] = None
-
+        self.active_arm_name: str = "left"
         self._bowl_uid: Optional[int] = None
         self._pan_uid: Optional[int] = None
-
         self._metrics: Dict[str, float] = {"transfer_ratio": 0.0, "in_pan": 0, "total": 0}
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-
+    # --- Lifecycle (Unchanged) ---
     def setup(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> None:
-        self.sim = sim
-        self.cfg = cfg
-
-        view_cfg = cfg.camera.get_active_view()
-        noise_cfg = cfg.camera.noise
-
-        # --- Setup a FIXED camera ---
+        self.sim = sim; self.cfg = cfg
+        view_cfg = cfg.camera.get_active_view(); noise_cfg = cfg.camera.noise
         LOGGER.info("Setting up fixed camera view: '%s'", cfg.camera.active_view)
-        self.camera = Camera(
-            client_id=sim.client_id,
-            view_xyz=view_cfg.xyz,
-            view_rpy_deg=view_cfg.rpy_deg,
-            fov_deg=view_cfg.fov_deg,
-            near=cfg.camera.near,
-            far=cfg.camera.far,
-            resolution=view_cfg.resolution,
-            noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob),
-        )
-        
-        # NOTE: We now aim the camera in _run_perception() using the *snapped* pose
-
-        # Use the "left" arm for consistency
-        active = sim.left_arm
-        self.active_arm_name = "left"
-        self._T_eef_cam = np.eye(4, dtype=float)
-        self._T_cam_eef = np.eye(4, dtype=float)
-
-        self.controller = VisionRefineController(
-            client_id=sim.client_id,
-            arm_id=active.body_id,
-            ee_link=active.ee_link,
-            arm_joints=active.joint_indices,
-            dt=sim.dt,
-            camera=self.camera,
-            handeye_T_cam_in_eef=self._T_cam_eef, # Pass identity, it won't be used
-            gripper_open=lambda width=0.08: sim.gripper_open(width=width, arm=self.active_arm_name),
-            gripper_close=lambda force=60.0: sim.gripper_close(force=force, arm=self.active_arm_name),
-        )
-
+        self.camera = Camera( client_id=sim.client_id, view_xyz=view_cfg.xyz, view_rpy_deg=view_cfg.rpy_deg, fov_deg=view_cfg.fov_deg, near=cfg.camera.near, far=cfg.camera.far, resolution=view_cfg.resolution, noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob))
+        active = sim.left_arm; self.active_arm_name = "left"
+        # Ensure using strong grip force from setup
+        self.controller = VisionRefineController( client_id=sim.client_id, arm_id=active.body_id, ee_link=active.ee_link, arm_joints=active.joint_indices, dt=sim.dt, camera=self.camera, handeye_T_cam_in_eef=np.eye(4), gripper_open=lambda width=0.08: sim.gripper_open(width=width, arm=self.active_arm_name), gripper_close=lambda force=200.0: sim.gripper_close(force=force, arm=self.active_arm_name))
         sim.gripper_open(arm=self.active_arm_name)
-        if cfg.particles > 0:
-            sim.spawn_rice_particles(cfg.particles, seed=cfg.seed)
-
+        if cfg.particles > 0: sim.spawn_rice_particles(cfg.particles, seed=cfg.seed)
         bowl_entry = sim.objects.get("bowl") or sim.objects.get("rice_bowl")
         pan_entry = sim.objects.get("pan")
-        if bowl_entry is None or pan_entry is None:
-            raise RuntimeError("Missing bowl or pan objects in simulation.")
-        self._bowl_uid = int(bowl_entry["body_id"])
-        self._pan_uid = int(pan_entry["body_id"])
+        if bowl_entry is None or pan_entry is None: raise RuntimeError("Missing bowl or pan objects.")
+        self._bowl_uid = int(bowl_entry["body_id"]); self._pan_uid = int(pan_entry["body_id"])
 
     def plan(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
-        LOGGER.info("Planning completed (fixed camera, no IBVS).")
-        return True
+        LOGGER.info("Planning completed (fixed camera, no IBVS)."); return True
 
     def execute(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
-        if not self.camera or not self.controller:
-            raise RuntimeError("Task not set up.")
+        if not self.camera or not self.controller: raise RuntimeError("Task not set up.")
         bowl_entry = sim.objects.get("bowl") or sim.objects.get("rice_bowl")
-        if bowl_entry is None:
-            LOGGER.error("Bowl not found in simulation objects.")
-            return False
-
-        # Run perception ONCE from the fixed location
+        if bowl_entry is None: LOGGER.error("Bowl not found."); return False
         detection = self._run_perception(sim, cfg, bowl_entry)
-        if detection is None:
-            LOGGER.error("Perception failed from fixed camera pose.")
-            self._metrics = {"transfer_ratio": 0.0, "in_pan": 0, "total": 0}
-            return False
-
+        if detection is None: LOGGER.error("Perception failed."); self._metrics = {"transfer_ratio":0.0,"in_pan":0,"total":0}; return False
         success = self._perform_pour_sequence(sim, cfg, detection)
-        self._metrics = sim.count_particles_in_pan()
-        return success
+        self._metrics = sim.count_particles_in_pan(); return success
 
     def metrics(self, sim: RobotChefSimulation) -> Dict[str, float]:
         return dict(self._metrics)
 
-    # ------------------------------------------------------------------ #
-    # Perception
-
-    def _run_perception(
-        self,
-        sim: RobotChefSimulation,
-        cfg: PourTaskConfig,
-        bowl_entry: Dict[str, object],
-    ) -> Optional[Dict[str, object]]:
-        """
-        Captures a single detection from the fixed camera pose.
-        Aims camera at the correct, snapped pose first.
-        """
-        assert self.camera is not None
-        assert self.controller is not None
-
-        # Get the (now correct) snapped pose from the sim object
+    # --- Perception (Unchanged) ---
+    def _run_perception( self, sim: RobotChefSimulation, cfg: PourTaskConfig, bowl_entry: Dict[str, object],) -> Optional[Dict[str, object]]:
+        assert self.camera is not None and self.controller is not None
         bowl_pose: Pose6D = bowl_entry["pose"]
-        if bowl_pose is None:
-            LOGGER.error("Bowl pose is missing from simulation object entry.")
-            return None
-            
-        # Aim the camera at the correct, snapped pose RIGHT before capture
+        if bowl_pose is None: LOGGER.error("Bowl pose missing."); return None
         self.camera.aim_at_world(bowl_pose.position)
-        LOGGER.info(
-            "Aimed camera at final bowl pose: (%.3f, %.3f, %.3f)",
-            bowl_pose.x, bowl_pose.y, bowl_pose.z
-        )
-
+        LOGGER.info("Aimed camera at final bowl pose: (%.3f, %.3f, %.3f)", bowl_pose.x, bowl_pose.y, bowl_pose.z)
         LOGGER.info("Running perception from fixed camera.")
         detection = self._capture_detection(sim, cfg, bowl_entry, bowl_pose, attempt=1)
-        if detection is not None:
-            return detection
-        
-        LOGGER.error("Failed to detect bowl rim from fixed camera.")
-        return None
+        if detection is not None: return detection
+        LOGGER.error("Failed to detect bowl rim."); return None
 
-    def _capture_detection(
-        self,
-        sim: RobotChefSimulation,
-        cfg: PourTaskConfig,
-        bowl_entry: Dict[str, object],
-        bowl_pose: Pose6D,
-        attempt: int,
-    ) -> Optional[Dict[str, object]]:
+    def _capture_detection( self, sim: RobotChefSimulation, cfg: PourTaskConfig, bowl_entry: Dict[str, object], bowl_pose: Pose6D, attempt: int,) -> Optional[Dict[str, object]]:
         assert self.camera is not None
         rgb, depth, K, seg_mask = self.camera.get_rgbd(with_segmentation=True)
-        depth_valid = depth[depth > 0.0]
-        dmin = float(depth_valid.min()) if depth_valid.size else 0.0
-        dmax = float(depth_valid.max()) if depth_valid.size else 0.0
-
-        cam_pose = self.camera.world_from_camera[:3, 3]
-        LOGGER.info(
-            "Camera at (%.3f, %.3f, %.3f) looking at bowl (%.3f, %.3f, %.3f)",
-            cam_pose[0],
-            cam_pose[1],
-            cam_pose[2],
-            bowl_pose.x,
-            bowl_pose.y,
-            bowl_pose.z,
-        )
-
-        LOGGER.info(
-            "Using RGB-D rim detection (depth range %.3f m – %.3f m, attempt %d)",
-            dmin,
-            dmax,
-            attempt,
-        )
-        seg = {
-            "client_id": sim.client_id,
-            "camera_from_world": self.camera.camera_from_world,
-            "world_from_camera": self.camera.world_from_camera,
-            "perception_cfg": cfg.perception,
-            "bowl_properties": bowl_entry.get("properties", {}),
-            "bowl_pose": bowl_pose,
-            "segmentation": seg_mask,
-        }
-        try:
-            detection = detect_bowl_rim(
-                rgb=rgb,
-                depth=depth,
-                K=K,
-                seg=seg,
-                bowl_uid=int(bowl_entry["body_id"]),
-            )
-        except Exception as exc:
-            LOGGER.warning("Rim detection attempt %d failed: %s", attempt, exc)
-            return None
-
+        seg = { "client_id": sim.client_id, "camera_from_world": self.camera.camera_from_world, "world_from_camera": self.camera.world_from_camera, "perception_cfg": cfg.perception, "bowl_properties": bowl_entry.get("properties", {}), "bowl_pose": bowl_pose, "segmentation": seg_mask,}
+        try: detection = detect_bowl_rim(rgb=rgb, depth=depth, K=K, seg=seg, bowl_uid=int(bowl_entry["body_id"]))
+        except Exception as exc: LOGGER.warning("Rim detection failed: %s", exc); return None
         candidates = detection.get("grasp_candidates", [])
-        rim_pts = np.asarray(detection.get("rim_pts_3d", []), dtype=float)
-        if rim_pts.shape[0] < 2 or len(candidates) == 0:
-            LOGGER.warning("No valid rim detection on attempt %d", attempt)
-            return None
-
-        overlay = rgb.copy()
-        for uv in detection["features_px"]["uv_pair"]:
-            u, v = int(round(uv[0])), int(round(uv[1]))
-            if 0 <= v < overlay.shape[0] and 0 <= u < overlay.shape[1]:
-                overlay[max(0, v - 2) : min(overlay.shape[0], v + 3), max(0, u - 2) : min(overlay.shape[1], u + 3)] = [255, 64, 64]
-        
-        # Save overlay to the CWD
-        out_path = Path(f"attempt{attempt:02d}_overlay.png")
-        _write_png(out_path, overlay)
-        LOGGER.info("Saved detection overlay to %s", out_path.absolute())
-
-
-        LOGGER.info(
-            "Detected rim: pts=%d, candidates=%d",
-            rim_pts.shape[0],
-            len(candidates),
-        )
-        
-        feature_pts_world = np.asarray(detection["features_px"]["points_world"], dtype=float)
-        self._feature_points_world = feature_pts_world
-        self._target_uv = np.asarray(detection["features_px"]["uv_pair"], dtype=float)
-        self._target_Z = np.asarray(detection["features_px"]["Z_pair"], dtype=float)
+        if not candidates: LOGGER.warning("No grasp candidates found."); return None
+        out_path = Path(f"attempt{attempt:02d}_overlay.png"); _write_png(out_path, rgb);
+        LOGGER.info("Saved detection overlay to %s", out_path.absolute()); LOGGER.info("Detected rim.")
         return detection
 
-    # ------------------------------------------------------------------ #
-    # Execution
-
+    # --- Execution ---
     def _perform_pour_sequence(
-        self,
-        sim: RobotChefSimulation,
-        cfg: PourTaskConfig,
-        detection: Dict[str, object],
+        self, sim: RobotChefSimulation, cfg: PourTaskConfig, detection: Dict[str, object],
     ) -> bool:
         assert self.controller is not None
         assert self.camera is not None
 
         candidates = sorted(detection["grasp_candidates"], key=lambda c: c.get("quality", 0.0), reverse=True)
-        if not candidates:
-            LOGGER.error("No grasp candidates found in detection.")
-            return False
+        if not candidates: LOGGER.error("No grasp candidates."); return False
 
-        # Define a threshold for successful grasp.
-        # The bowl wall is ~8mm thick. 5mm is a safe threshold.
-        MIN_GRASP_WIDTH = 0.005 # 5mm
+        MIN_GRASP_WIDTH = 0.005
+        LONG_TIMEOUT = 12.0 # Increased slightly again
+        NORMAL_TIMEOUT = 9.0 # Increased slightly again
+
+        # --- GENTLER POUR PARAMS (v5 - Slower, More Steps) ---
+        POUR_STEPS = 500 # Even more steps
+        TOTAL_POUR_TIME_S = 10.0 # Pour over 10 seconds (very slow!)
+        POUR_STEP_SIM_TIME = max(1, int( (TOTAL_POUR_TIME_S / POUR_STEPS) / sim.dt ))
+        POUR_STEP_GAIN = 0.015 # Extremely low gain for max smoothness
+        # --- END GENTLER POUR PARAMS ---
+
 
         for idx, candidate in enumerate(candidates[:3]):
-            LOGGER.info("Attempting grasp candidate %d with quality %.2f", idx + 1, candidate["quality"])
+            LOGGER.info("Attempting grasp candidate %d", idx + 1)
+            # === Step 1: Grip the rim === (Unchanged logic)
             position = np.array(candidate["pose_world"]["position"], dtype=float)
-            quat = np.array(candidate["pose_world"]["quaternion"], dtype=float)
+            quat_grasp = np.array(candidate["pose_world"]["quaternion"], dtype=float)
             clearance = cfg.perception.grasp_clearance_m
-
-            # 1. Move to pre-grasp (Offset in World Z)
-            pregrasp = position.copy()
-            pregrasp[2] += clearance + 0.08 # Simple World Z offset
-            
+            pregrasp_pose = position.copy(); pregrasp_pose[2] += clearance + 0.15
             self.controller.open_gripper()
-            if not self.controller.move_waypoint(pregrasp, quat):
-                LOGGER.warning("Failed to reach pre-grasp waypoint.")
-                continue
-
-            # 2. Move to approach (Offset in World Z)
-            approach = position.copy()
-            approach[2] += clearance # Simple World Z offset
-            if not self.controller.move_waypoint(approach, quat):
-                LOGGER.warning("Failed to reach approach waypoint.")
-                continue
-
-            # 3. --- IBVS is Skipped ---
-            LOGGER.info("Skipping IBVS refinement (using fixed camera).")
-
-            # 4. Move to final grasp pose (Offset in World Z)
-            grasp_pose = position.copy()
-            grasp_pose[2] += max(0.0, getattr(cfg.perception, "rim_thickness_m", 0.006) * 0.5)
-            if not self.controller.move_waypoint(grasp_pose, quat):
-                LOGGER.warning("Could not descend to final grasp pose.")
-                continue
-
-            # 5. Grasp and VERIFY
-            self.controller.close_gripper()
-            sim.step_simulation(steps=120) # Wait for grasp to settle
-
-            # --- Grasp verification (Force Closure Check) ---
+            if not self.controller.move_waypoint(pregrasp_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Pre-grasp failed."); continue
+            approach_pose = position.copy(); approach_pose[2] += clearance + 0.01
+            if not self.controller.move_waypoint(approach_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Approach failed."); continue
+            grasp_pose = position.copy(); grasp_pose[2] += max(0.0, cfg.perception.rim_thickness_m * 0.5) - 0.003
+            if not self.controller.move_waypoint(grasp_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Grasp pose failed."); continue
+            self.controller.close_gripper(); LOGGER.info("Pausing after grasp command..."); sim.step_simulation(steps=240)
             current_width = sim.get_gripper_width(arm=self.active_arm_name)
-            
-            if current_width < MIN_GRASP_WIDTH:
-                LOGGER.warning(
-                    "Grasp verification FAILED for candidate %d (width %.4f m < %.4f m). Retrying.",
-                    idx + 1, current_width, MIN_GRASP_WIDTH
-                )
-                # Open gripper and back away before trying next candidate
-                self.controller.open_gripper()
-                self.controller.move_waypoint(pregrasp, quat) # Move back to pregrasp
-                continue # Try next candidate
-            
-            LOGGER.info(
-                "Grasp verification SUCCEEDED for candidate %d (width %.4f m).",
-                idx + 1, current_width
-            )
-            # --- END Grasp verification ---
+            if current_width < MIN_GRASP_WIDTH: LOGGER.warning("Grasp FAILED (%.4f < %.4f). Retrying.", current_width, MIN_GRASP_WIDTH); self.controller.open_gripper(); self.controller.move_waypoint(pregrasp_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT); continue
+            LOGGER.info("Grasp SUCCEEDED (%.4f).", current_width)
 
-            # 6. Lift (Offset in World Z)
-            lift_pose = grasp_pose.copy()
-            lift_pose[2] += 0.35 # Simple World Z offset
-            self.controller.move_waypoint(lift_pose, quat)
-
-            # 7. Move to Pan and Pour
-            
-            # Get pan pose from simulation (it's already yawed)
+            # === Step 2: Lift the bowl === (Unchanged logic)
             pan_pose_sim: Pose6D = sim.objects["pan"]["pose"]
-            pan_quat = _pose_to_quaternion(pan_pose_sim)
-            above_pan = np.array([pan_pose_sim.x, pan_pose_sim.y, pan_pose_sim.z + 0.25], dtype=float)
-            self.controller.move_waypoint(above_pan, pan_quat)
+            if pan_pose_sim is None: LOGGER.error("Pan pose missing."); continue
+            safe_lift_z = pan_pose_sim.z + 0.35
+            intermediate_lift_pos = grasp_pose.copy(); intermediate_lift_pos[2] += 0.20
+            LOGGER.info("Lifting straight up to %.3f m", intermediate_lift_pos[2])
+            if not self.controller.move_waypoint(intermediate_lift_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Initial lift failed."); continue
+            LOGGER.info("Pausing after initial lift..."); sim.step_simulation(steps=120)
+            safe_lift_pos = intermediate_lift_pos.copy(); safe_lift_pos[2] = safe_lift_z
+            LOGGER.info("Lifting to safe height: %.3f m", safe_lift_z)
+            self.controller.move_waypoint(safe_lift_pos, quat_grasp, timeout_s=LONG_TIMEOUT)
 
-            # Get pour pose from config (MUST be yawed)
-            pan_pour_pose = _apply_world_yaw(cfg.pan_pour_pose, cfg.scene.world_yaw_deg)
-            pour_quat = p.getQuaternionFromEuler([pan_pour_pose.roll, pan_pour_pose.pitch, pan_pour_pose.yaw])
-            pour_pos = np.array([pan_pour_pose.x, pan_pour_pose.y, pan_pour_pose.z], dtype=float)
-            self.controller.move_waypoint(pour_pos, np.array(pour_quat, dtype=float))
+            # === Step 3: Move above the pan (No rotation, Corrected XY) ===
+            pan_center_xy = np.array([pan_pose_sim.x, pan_pose_sim.y], dtype=float)
+            pan_quat_xyzw = _pose_to_quaternion(pan_pose_sim)
+            pan_R = np.array(p.getMatrixFromQuaternion(pan_quat_xyzw)).reshape(3, 3)
+            # --- INCREASED OFFSET DISTANCE SIGNIFICANTLY ---
+            # Assume pan radius is ~0.16
+            # Offset by half the radius (8cm) + a bit more = 12cm total
+            offset_dist = 0.12 # Offset 12cm along pan's X-axis (should be well into cooking area)
+            offset_local = np.array([offset_dist, 0.0, 0.0], dtype=float) # Offset along Pan's X
+            offset_world = pan_R @ offset_local
+            above_pan_target_xy = pan_center_xy + offset_world[:2]
+            above_pan_target_pos = np.array([above_pan_target_xy[0], above_pan_target_xy[1], safe_lift_z], dtype=float)
+            level_quat = quat_grasp # Keep original grasp orientation
 
-            hold_steps = max(1, int(cfg.hold_sec / sim.dt))
-            for _ in range(hold_steps):
-                sim.step_simulation(steps=1)
+            # 3a. Smooth horizontal move
+            HORIZONTAL_MOVE_STEPS = 25 # More steps
+            current_ls = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
+            start_pos_horizontal = np.array(current_ls[0], dtype=float)
+            LOGGER.info("Moving smoothly above pan cooking area (offset %.2f m) over %d steps...", offset_dist, HORIZONTAL_MOVE_STEPS)
+            for i in range(HORIZONTAL_MOVE_STEPS + 1):
+                alpha = i / HORIZONTAL_MOVE_STEPS
+                inter_pos = (1.0 - alpha) * start_pos_horizontal + alpha * above_pan_target_pos
+                step_timeout = max(sim.dt * 12, LONG_TIMEOUT / HORIZONTAL_MOVE_STEPS) # Longer step timeout
+                if not self.controller.move_waypoint(inter_pos, level_quat, timeout_s=step_timeout): LOGGER.warning("Intermediate horizontal move step %d failed.", i); break
+            LOGGER.info("Ensuring final horizontal position above pan cooking area.")
+            self.controller.move_waypoint(above_pan_target_pos, level_quat, timeout_s=NORMAL_TIMEOUT)
 
-            # 8. Return bowl
-            self.controller.move_waypoint(lift_pose, quat) # Use the same lift pose
-            
-            place_pose = grasp_pose.copy()
-            place_pose[2] += clearance + 0.03 # Simple World Z offset
-            self.controller.move_waypoint(place_pose, quat)
-            
-            self.controller.open_gripper()
-            sim.step_simulation(steps=60)
-            
-            # Lift arm up after placing
-            lift_pose[2] += 0.3 # Even higher
-            self.controller.move_waypoint(lift_pose, quat)
-            
-            LOGGER.info("Grasp and pour sequence successful.")
-            return True # <-- Note: We return True inside the loop on success
+            # 3b. Define Pour Start Pose (Use target XY at safe height, still level)
+            # --- REMOVED downward move before pour ---
+            pour_start_pos = above_pan_target_pos # Start pour rotation from the safe height
+            pour_start_quat = level_quat # Still level
+            LOGGER.info("Ready to pour at start pose Z=%.3f m", pour_start_pos[2])
 
-        # If we exit the loop, all candidates failed verification
-        LOGGER.error("All grasp candidates failed (or failed verification).")
-        return False
 
+            # === Step 4: Perform the pour slowly (using joint interpolation) ===
+            tilt_rad = math.radians(cfg.tilt_angle_deg)
+            current_orn_matrix = np.array(p.getMatrixFromQuaternion(pour_start_quat)).reshape(3, 3)
+            cy, sy = math.cos(tilt_rad), math.sin(tilt_rad)
+            R_pitch_local = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=float)
+            pour_orn_matrix = current_orn_matrix @ R_pitch_local
+            pour_quat_target = _matrix_to_quaternion(pour_orn_matrix)
+            # Pour target position keeps the same XY, drops Z slightly but stays high
+            pour_pos_target = pour_start_pos.copy()
+            pan_props = sim.objects["pan"]["properties"]
+            pan_rim_height = pan_pose_sim.z + pan_props.get("depth", 0.045)
+            pour_pos_target[2] = max(pan_rim_height + 0.15, pour_start_pos[2] - 0.03) # Ensure pour ends >= 15cm above rim
+
+
+            # Get IK for start and end
+            q_start_pour = self.controller.get_ik_for_pose(pour_start_pos, pour_start_quat)
+            q_end_pour = self.controller.get_ik_for_pose(pour_pos_target, pour_quat_target)
+            if q_start_pour is None or q_end_pour is None:
+                LOGGER.error("Failed to get IK for pour motion. Aborting."); continue
+
+            # --- GENTLE POUR LOOP ---
+            LOGGER.info("Executing gentle pour rotation over %d steps...", POUR_STEPS)
+            for i in range(POUR_STEPS + 1):
+                alpha = i / POUR_STEPS
+                q_current = (1.0 - alpha) * q_start_pour + alpha * q_end_pour
+                # Command target with low gain, then step sim
+                self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
+                sim.step_simulation(steps=POUR_STEP_SIM_TIME)
+            # --- END GENTLE POUR LOOP ---
+
+            LOGGER.info("Holding pour..."); hold_steps = max(1, int(cfg.hold_sec / sim.dt));
+            for _ in range(hold_steps): sim.step_simulation(steps=1)
+
+            # === Step 5: Put the bowl back ===
+            # 5a. Rotate back slowly to level pose (reverse loop)
+            LOGGER.info("Returning SLOWLY bowl to level pose...")
+            for i in range(POUR_STEPS + 1):
+                alpha = (POUR_STEPS - i) / POUR_STEPS # Reverse alpha
+                q_current = (1.0 - alpha) * q_start_pour + alpha * q_end_pour
+                self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
+                sim.step_simulation(steps=POUR_STEP_SIM_TIME)
+
+            # 5b. (Optional: Lift slightly higher before moving back, already at safe_lift_z)
+            LOGGER.info("Lifting bowl slightly before moving back.")
+            lift_return_pos = pour_start_pos.copy(); lift_return_pos[2] = safe_lift_z + 0.05 # Go slightly above safe height
+            self.controller.move_waypoint(lift_return_pos, level_quat, timeout_s = NORMAL_TIMEOUT)
+
+
+            # 5c. Move horizontally back
+            LOGGER.info("Moving smoothly back above bowl start position...")
+            back_target_pos = intermediate_lift_pos
+            current_ls_return = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
+            start_pos_return = np.array(current_ls_return[0], dtype=float)
+            for i in range(HORIZONTAL_MOVE_STEPS + 1):
+                alpha = i / HORIZONTAL_MOVE_STEPS
+                inter_pos = (1.0 - alpha) * start_pos_return + alpha * back_target_pos
+                step_timeout = max(sim.dt * 12, LONG_TIMEOUT / HORIZONTAL_MOVE_STEPS) # Longer step timeout
+                if not self.controller.move_waypoint(inter_pos, level_quat, timeout_s=step_timeout): LOGGER.warning("Intermediate return move step %d failed.", i)
+            LOGGER.info("Ensuring final return position above bowl.")
+            self.controller.move_waypoint(back_target_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT)
+
+            # 5d. Place bowl down
+            place_pose = grasp_pose.copy(); place_pose[2] += clearance + 0.05
+            LOGGER.info("Placing bowl back.")
+            self.controller.move_waypoint(place_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT)
+
+            # 5e. Open gripper and retract
+            self.controller.open_gripper(); sim.step_simulation(steps=60)
+            LOGGER.info("Retracting arm.")
+            retract_pos_1 = place_pose.copy(); retract_pos_1[2] = intermediate_lift_pos[2]
+            self.controller.move_waypoint(retract_pos_1, quat_grasp, timeout_s=NORMAL_TIMEOUT)
+            retract_pos_2 = retract_pos_1.copy(); retract_pos_2[2] += 0.15
+            self.controller.move_waypoint(retract_pos_2, quat_grasp, timeout_s=NORMAL_TIMEOUT)
+
+            LOGGER.info("Grasp and pour sequence successful."); return True # Success!
+
+        # If loop finishes, all candidates failed
+        LOGGER.error("All grasp candidates failed."); return False
 
 __all__ = ["PourBowlIntoPanAndReturn"]
