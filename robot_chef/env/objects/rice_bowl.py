@@ -25,22 +25,24 @@ def create_rice_bowl(
     inner_radius = radius - wall_thickness
     wall_height = inner_height
 
+    # --- BEGIN FIX: Replaced base cylinder with a box ---
     shape_types = [
-        p.GEOM_CYLINDER,  # base disk
+        p.GEOM_BOX,  # base disk (NOW A BOX)
         p.GEOM_BOX,
         p.GEOM_BOX,
         p.GEOM_BOX,
         p.GEOM_BOX,
     ]
-    radii = [radius, 0.0, 0.0, 0.0, 0.0]
-    lengths = [base_thickness, 0.0, 0.0, 0.0, 0.0]
+    radii = [0.0, 0.0, 0.0, 0.0, 0.0]
+    lengths = [0.0, 0.0, 0.0, 0.0, 0.0]
     half_extents = [
-        [0.0, 0.0, 0.0],
+        [radius, radius, base_thickness / 2.0], # <-- FIXED BASE
         [wall_thickness / 2.0, inner_radius, wall_height / 2.0],
         [wall_thickness / 2.0, inner_radius, wall_height / 2.0],
-        [inner_radius, wall_thickness / 2.0, wall_height / 2.0],
-        [inner_radius, wall_thickness / 2.0, wall_height / 2.0],
+        [inner_radius, wall_thickness / 2.0, wall_height / 2.0], # <-- Reverted
+        [inner_radius, wall_thickness / 2.0, wall_height / 2.0], # <-- Reverted
     ]
+    
     collision_positions = [
         [0.0, 0.0, 0.0],
         [inner_radius + wall_thickness / 2.0, 0.0, wall_height / 2.0],
