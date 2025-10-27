@@ -90,16 +90,24 @@ class Simulator:
         return np.asarray(q, dtype=float), np.asarray(dq, dtype=float)
 
     def set_joint_positions(
-        self, q_target: Sequence[float], arm: Optional[str] = None, kp: float = 0.3
+        self,
+        target_pos: Sequence[float],
+        arm: Optional[str] = None,
+        kp: float = 0.3,
     ) -> None:
         arm_state = self.get_arm(arm)
-        if len(q_target) != len(arm_state.joint_indices):
-            raise ValueError("q_target must have length 7 for the Panda arm")
+        if len(target_pos) != len(arm_state.joint_indices):
+            raise ValueError(
+                (
+                    f"q_target must have length 7 for the Panda arm : "
+                    f"{len(target_pos)} : {str(target_pos)}"
+                )
+            )
         p.setJointMotorControlArray(
             bodyUniqueId=arm_state.body_id,
             jointIndices=list(arm_state.joint_indices),
             controlMode=p.POSITION_CONTROL,
-            targetPositions=list(q_target),
+            targetPositions=list(target_pos),
             positionGains=[kp] * len(arm_state.joint_indices),
             forces=[240.0] * len(arm_state.joint_indices),
             physicsClientId=self.client_id,

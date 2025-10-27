@@ -25,7 +25,7 @@ class ArmState:
 def create_arm(
     client_id: int,
     pose: Pose6D,
-) -> int:
+) -> ArmState:
     flags = p.URDF_USE_SELF_COLLISION | p.URDF_USE_SELF_COLLISION_EXCLUDE_ALL_PARENTS
     base_orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
     arm_id = p.loadURDF(

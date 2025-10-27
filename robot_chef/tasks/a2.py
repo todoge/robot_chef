@@ -7,11 +7,12 @@ import pybullet as p
 
 from ..config import Pose6D, MainConfig
 from ..sim import Simulator
+from ..tasks.base import Task
 
 LOGGER = logging.getLogger(__name__)
 
 
-class A2:
+class A2(Task):
     """Bimanual stirring task using spatula and pan handle"""
     def __init__(self):
         self.sim: Simulator | None = None
@@ -44,11 +45,44 @@ class A2:
         self.sim.step_simulation(steps=240)
 
         # grasp
-        self.sim.gripper_close(arm="right")
-        self.sim.step_simulation(steps=120)
+        # self.sim.gripper_close(arm="right")
+        # self.sim.step_simulation(steps=120)
+        # gripper_link = self.sim.right_arm.ee_link
+        # c_id = p.createConstraint(
+        #     parentBodyUniqueId=self.sim.right_arm.body_id,
+        #     parentLinkIndex=gripper_link,
+        #     childBodyUniqueId=spatula_id,
+        #     childLinkIndex=-1,
+        #     jointType=p.JOINT_FIXED,
+        #     jointAxis=[0, 0, 0],
+        #     parentFramePosition=[0, 0, 0],
+        #     childFramePosition=[0, 0, 0],
+        #     physicsClientId=self.sim.client_id,
+        # )
 
-        
+        # # stirring motion
+        # pan_pos = p.getBasePositionAndOrientation(pan_id)[0]
+        # radius = 0.07
+        # height = pan_pos[2] + 0.03
+        # for theta in np.linspace(0, 2 * math.pi, 50):
+        #     target_pos = [
+        #         pan_pos[0] + radius * math.cos(theta),
+        #         pan_pos[1] + radius * math.sin(theta),
+        #         height,
+        #     ]
+        #     joint_pos = p.calculateInverseKinematics(
+        #         self.sim.right_arm.body_id,
+        #         gripper_link,
+        #         target_pos,
+        #         targetOrientation=spatula_orn,
+        #         physicsClientId=self.sim.client_id,
+        #     )
+        #     self.sim.set_joint_positions(joint_pos, arm="right")
+        #     self.sim.step_simulation(steps=10)
 
+
+    def metrics(self):
+        return None        
 
     def _inverse_kinematics(self, arm: str, pos: np.ndarray, quat: tuple) -> np.ndarray:
         arm_state = self.sim.get_arm(arm)
