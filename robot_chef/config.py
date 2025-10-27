@@ -1,4 +1,4 @@
-"""Configuration loading utilities for the Robot Chef pour task."""
+"""Configuration loading utilities for the Robot Chef stir task."""
 
 from __future__ import annotations
 
@@ -106,20 +106,22 @@ class TaskNoiseConfig:
 
 @dataclass(frozen=True)
 class TaskRuntimeConfig:
-    pan_pour_pose: Pose6D
+    pan_stir_pose: Pose6D
     tilt_angle_deg: float
     hold_sec: float
     noise: TaskNoiseConfig
 
 
 @dataclass(frozen=True)
-class PourTaskConfig:
+class MainConfig:
     bowl_pose: Pose6D
     pan_pose: Pose6D
-    pan_pour_pose: Pose6D
+    pan_stir_pose: Pose6D
+    spatula_pose: Pose6D
     tilt_angle_deg: float
     hold_sec: float
-    particles: int
+    rice_particles: int
+    egg_particles: int
     tolerances: TolerancesConfig
     scene: SceneConfig
     camera: CameraConfig
@@ -190,8 +192,8 @@ def _load_scene(config_dict: MutableMapping[str, object]) -> SceneConfig:
 
 def _load_task_runtime(config_dict: MutableMapping[str, object]) -> TaskRuntimeConfig:
     task_dict = dict(config_dict.get("task", {}))
-    pan_pour_pose = Pose6D.from_iterable(
-        task_dict.get("pan_pour_pose", config_dict.get("pan_pour_pose", (0, 0, 0, 0, 0, 0)))
+    pan_stir_pose = Pose6D.from_iterable(
+        task_dict.get("pan_stir_pose", config_dict.get("pan_stir_pose", (0, 0, 0, 0, 0, 0)))
     )
     tilt_angle_deg = float(task_dict.get("tilt_angle_deg", config_dict.get("tilt_angle_deg", 135.0)))
     hold_sec = float(task_dict.get("hold_sec", config_dict.get("hold_sec", 2.0)))
@@ -201,28 +203,30 @@ def _load_task_runtime(config_dict: MutableMapping[str, object]) -> TaskRuntimeC
         drop_prob=float(noise_dict.get("drop_prob", 0.0)),
     )
     return TaskRuntimeConfig(
-        pan_pour_pose=pan_pour_pose,
+        pan_stir_pose=pan_stir_pose,
         tilt_angle_deg=tilt_angle_deg,
         hold_sec=hold_sec,
         noise=noise,
     )
 
 
-def load_pour_task_config(path: Union[str, Path]) -> PourTaskConfig:
-    """Load the pour task configuration from a YAML file and validate."""
+def load_stir_task_config(path: Union[str, Path]) -> MainConfig:
+    """Load the stir task configuration from a YAML file and validate."""
     with open(Path(path), "r", encoding="utf-8") as fh:
         data: MutableMapping[str, object] = yaml.safe_load(fh) or {}
 
     bowl_pose = Pose6D.from_iterable(data.get("bowl_pose", (0, 0, 0, 0, 0, 0)))
     pan_pose = Pose6D.from_iterable(data.get("pan_pose", (0, 0, 0, 0, 0, 0)))
-    pan_pour_pose = Pose6D.from_iterable(
-        data.get("pan_pour_pose", data.get("pan_pose", (0, 0, 0, 0, 0, 0)))
+    pan_stir_pose = Pose6D.from_iterable(
+        data.get("pan_stir_pose", data.get("pan_pose", (0, 0, 0, 0, 0, 0)))
     )
+    spatula_pose = Pose6D.from_iterable(data.get("spatula_pose", (0, 0, 0, 0, 0, 0)))
     task_runtime = _load_task_runtime(data)
 
     tilt_angle_deg = float(data.get("tilt_angle_deg", task_runtime.tilt_angle_deg))
     hold_sec = float(data.get("hold_sec", task_runtime.hold_sec))
-    particles = int(data.get("particles", 0))
+    rice_particles = int(data.get("rice_particles", 0))
+    egg_particles = int(data.get("egg_particles", 0))
     seed = int(data.get("seed", 0))
 
     camera_cfg = _load_camera(data)
@@ -230,13 +234,15 @@ def load_pour_task_config(path: Union[str, Path]) -> PourTaskConfig:
     tolerances_cfg = _load_tolerances(data)
     scene_cfg = _load_scene(data)
 
-    return PourTaskConfig(
+    return MainConfig(
         bowl_pose=bowl_pose,
         pan_pose=pan_pose,
-        pan_pour_pose=pan_pour_pose,
+        pan_stir_pose=pan_stir_pose,
+        spatula_pose=spatula_pose,
         tilt_angle_deg=tilt_angle_deg,
         hold_sec=hold_sec,
-        particles=particles,
+        rice_particles=rice_particles,
+        egg_particles=egg_particles,
         tolerances=tolerances_cfg,
         scene=scene_cfg,
         camera=camera_cfg,
@@ -256,6 +262,6 @@ __all__ = [
     "SceneConfig",
     "TaskNoiseConfig",
     "TaskRuntimeConfig",
-    "PourTaskConfig",
-    "load_pour_task_config",
+    "MainConfig",
+    "load_stir_task_config",
 ]

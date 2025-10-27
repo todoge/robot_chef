@@ -1,0 +1,31 @@
+- assets
+    - on table
+        - spatula
+        - pan
+        - bowl
+        - chopping board
+        - plate
+    - food
+        - rice in bowl
+        - cracked egg in bowl
+        - carrot on table
+
+- stages
+    - A1 pour rice bowl to pan and egg to pan
+        - start with empty pan
+        - start with rice bowl and egg bowl
+        - end with rice and egg in pan, and empty bowls
+    - A2 stir fry
+        - start with spatula on table
+        - start with with rice and egg in pan
+        - end with rice and egg in pan
+    - A3 chopping
+        - start with chopping board on table
+        - start with carrot on board
+        - start with knife on table (standing)
+        - (optional) split carrot and transfer into bowl
+    - A4 pan to plate
+        - start with rice and egg in pan
+        - start with empty plate
+        - end with empty pan
+        - end with full plate

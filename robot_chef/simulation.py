@@ -19,10 +19,10 @@ import numpy as np
 import pybullet as p
 import pybullet_data
 
-from .config import Pose6D, PourTaskConfig
+from .config import Pose6D, MainConfig
 from .env.objects import pan as pan_factory
 from .env.objects import rice_bowl as bowl_factory
-from .env.particles import ParticleSet, spawn_spheres
+from .env.objects.particles import ParticleSet, spawn_particles
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,12 +50,19 @@ class ArmState:
 class RobotChefSimulation:
     """Encapsulates the physics world, robot arms, and task objects."""
 
-    def __init__(self, gui: bool, recipe: PourTaskConfig):
+    def __init__(self, gui: bool, recipe: MainConfig):
         self.recipe = recipe
         self.gui = gui
-        self.client_id = p.connect(p.GUI if gui else p.DIRECT)
-        LOGGER.info("Connected to PyBullet with client_id=%s (gui=%s)", self.client_id, gui)
 
+        # -----------------------------
+        # 1. Connect to PyBullet
+        # -----------------------------
+        self.client_id = p.connect(p.GUI if gui else p.DIRECT)
+        LOGGER.info("Connected to PyBullet (client_id=%s, gui=%s)", self.client_id, gui)
+
+        # -----------------------------
+        # 2. Configure physics
+        # -----------------------------
         self.dt = 1.0 / 240.0
         p.resetSimulation(physicsClientId=self.client_id)
         p.setPhysicsEngineParameter(numSolverIterations=120, fixedTimeStep=self.dt, physicsClientId=self.client_id)
@@ -63,13 +70,21 @@ class RobotChefSimulation:
         p.setGravity(0.0, 0.0, -9.81, physicsClientId=self.client_id)
         p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client_id)
 
+        # -----------------------------
+        # 3. Initialize internal state
+        # -----------------------------
         self.objects: Dict[str, Dict[str, object]] = {}
-        self.particles: Optional[ParticleSet] = None
+        self.rice_particles: Optional[ParticleSet] = None
+        self.egg_particles: Optional[ParticleSet] = None
 
-        # Build environment (table, bowl, pan, stove) and snap with AABBs
+        # -----------------------------
+        # 4. Build the environment
+        # -----------------------------
         self._setup_environment()
 
-        # Pedestals with collision-safe placement and arm mounting
+        # -----------------------------
+        # 5. Place pedestals for robot arms
+        # -----------------------------
         left_mount_id, right_mount_id, z_table = self._place_pedestals_clear_of_table(
             side=0.20,   # 20 cm square column
             margin=0.08  # 8 cm clearance from table edges
@@ -77,7 +92,9 @@ class RobotChefSimulation:
         self.objects["left_mount"] = {"body_id": left_mount_id, "top_z": z_table}
         self.objects["right_mount"] = {"body_id": right_mount_id, "top_z": z_table}
 
-        # Mount Panda arms on pedestal tops (useFixedBase=True), aligned with table yaw
+        # -----------------------------
+        # 6. Spawn Panda arms on pedestals
+        # -----------------------------
         yaw = math.radians(self.recipe.scene.world_yaw_deg)
         left_base_pos, _ = p.getBasePositionAndOrientation(left_mount_id, physicsClientId=self.client_id)
         right_base_pos, _ = p.getBasePositionAndOrientation(right_mount_id, physicsClientId=self.client_id)
@@ -91,21 +108,32 @@ class RobotChefSimulation:
             base_orientation=p.getQuaternionFromEuler([0.0, 0.0, yaw - math.pi / 2.0]),
         )
 
-        # Default active arm is the right arm for pouring motions.
+        # -----------------------------
+        # 7. Attach spatula to right hand
+        # -----------------------------
+        self._attach_spatula_to_hand(
+            arm_state=self.right_arm,
+            spatula_sdf_path="robot_chef/env/spatula/model.sdf",
+        )
+        # -----------------------------
+        # 8. Default settings and simulation stabilization
+        # -----------------------------
         self._active_arm_name = "right"
         self.gripper_open()
         self.step_simulation(steps=60)
 
     # ------------------------------------------------------------------ #
-    # Environment & robot helpers
+    # Environment & object setup
 
     def _setup_environment(self) -> None:
+        """Load and place environment objects (plane, table, bowl, pan, stove)."""
         LOGGER.info("Setting up environment objects")
+
+        # 1. Plane
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
         self.objects["plane"] = {"body_id": plane_id}
 
-        # Position the table; we’ll snap objects to its true top using AABB.
-        # The table URDF origin is commonly at the ground; we lift/pose it here.
+        # 2. Table
         table_height_offset = -0.05
         table_pos = [0.5, 0.0, table_height_offset]
         table_orientation = p.getQuaternionFromEuler([0.0, 0.0, math.radians(self.recipe.scene.world_yaw_deg)])
@@ -118,7 +146,7 @@ class RobotChefSimulation:
         )
         self.objects["table"] = {"body_id": table_id, "base_position": table_pos}
 
-        # Create bowl and pan at configured poses (apply world yaw).
+        # 3. Bowl and pan
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
         bowl_id, bowl_props = bowl_factory.create_rice_bowl(self.client_id, pose=bowl_pose)
         self.objects["bowl"] = {"body_id": bowl_id, "properties": bowl_props, "pose": bowl_pose}
@@ -127,31 +155,25 @@ class RobotChefSimulation:
         pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
         self.objects["pan"] = {"body_id": pan_id, "properties": pan_props, "pose": pan_pose}
 
-        # Build a stove “support block” sized from pan props (visual + contact stability).
+        # 4. Stove support block
         stove_half_xy = float(pan_props["half_side"]) + float(pan_props["wall_thickness"]) + 0.02
-        stove_height = float(max(0.01, float(pan_props["depth"]) * 0.9))
+        stove_height = max(0.01, float(pan_props["depth"]) * 0.9)
         stove_half_extent = (stove_half_xy, stove_half_xy, stove_height / 2.0)
 
-        # Initial pose; we’ll snap to table, then rest pan on stove.
         stove_pose = Pose6D(
             x=pan_pose.x,
             y=pan_pose.y,
-            z=pan_pose.z - stove_height,  # provisional, corrected by snapping
+            z=pan_pose.z - stove_height,
             roll=0.0,
             pitch=0.0,
             yaw=pan_pose.yaw,
         )
         stove_orientation = p.getQuaternionFromEuler(stove_pose.orientation_rpy)
         stove_collision = p.createCollisionShape(
-            p.GEOM_BOX,
-            halfExtents=stove_half_extent,
-            physicsClientId=self.client_id,
+            p.GEOM_BOX, halfExtents=stove_half_extent, physicsClientId=self.client_id
         )
         stove_visual = p.createVisualShape(
-            p.GEOM_BOX,
-            halfExtents=stove_half_extent,
-            rgbaColor=[0.96, 0.96, 0.96, 1.0],
-            physicsClientId=self.client_id,
+            p.GEOM_BOX, halfExtents=stove_half_extent, rgbaColor=[0.96, 0.96, 0.96, 1.0], physicsClientId=self.client_id
         )
         stove_id = p.createMultiBody(
             baseMass=0.0,
@@ -161,38 +183,23 @@ class RobotChefSimulation:
             baseOrientation=stove_orientation,
             physicsClientId=self.client_id,
         )
-        p.changeDynamics(
-            stove_id,
-            -1,
-            lateralFriction=1.1,
-            spinningFriction=0.9,
-            rollingFriction=0.6,
-            physicsClientId=self.client_id,
-        )
-        self.objects["stove_block"] = {
-            "body_id": stove_id,
-            "half_extents": stove_half_extent,
-            "pose": stove_pose,
-        }
+        p.changeDynamics(stove_id, -1, lateralFriction=1.1, spinningFriction=0.9, rollingFriction=0.6, physicsClientId=self.client_id)
+        self.objects["stove_block"] = {"body_id": stove_id, "half_extents": stove_half_extent, "pose": stove_pose}
 
-        # --- Deterministic placement using AABBs ---
+        # -----------------------------
+        # 5. Snap objects to supports
+        # -----------------------------
         z_table = self._get_table_top_z()
-
-        # 1) Stove rests on TABLE
         self._place_on_support(stove_id, support_top_z=z_table)
-
-        # 2) Pan rests on STOVE
         stove_top = self._get_body_top_z(stove_id)
         self._place_on_support(pan_id, support_top_z=stove_top)
-
-        # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
 
-        # Expose pan base height after snapping (useful for later metrics).
+        # Update pan base height for later metrics
         pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
         pan_props["base_height"] = float(pan_aabb_min[2])
 
-        # Let contacts settle for one frame (visual nicety).
+        # Let contacts settle for one frame
         p.stepSimulation(physicsClientId=self.client_id)
 
     # ---------- Mounts / pedestals with clearance ---------- #
@@ -271,6 +278,43 @@ class RobotChefSimulation:
         )
         p.changeDynamics(body_id, -1, lateralFriction=1.0, spinningFriction=0.6, physicsClientId=self.client_id)
         return body_id
+    
+    def _attach_spatula_to_hand(self, arm_state: ArmState, spatula_sdf_path: str) -> None:
+        """
+        Load the spatula SDF model and attach it to the Panda hand via a fixed constraint.
+        """
+        # Load the spatula from SDF
+        spatula_ids = p.loadSDF(spatula_sdf_path, physicsClientId=self.client_id)
+        if not spatula_ids:
+            raise RuntimeError(f"Failed to load spatula from {spatula_sdf_path}")
+        spatula_id = spatula_ids[0]  # SDF can return multiple bodies; usually first is main
+
+        # Get Panda hand pose
+        hand_pos, hand_orn = p.getLinkState(arm_state.body_id, arm_state.ee_link, physicsClientId=self.client_id)[:2]
+
+        # Optionally adjust offset so spatula handle sits nicely in the gripper
+        # Example: translate along local Z of hand (you may need to tweak)
+        offset_pos = [0.0, 0.0, 0.1]  # 10 cm along hand Z
+        spatula_pos = [hand_pos[0] + offset_pos[0], hand_pos[1] + offset_pos[1], hand_pos[2] + offset_pos[2]]
+        spatula_orn = hand_orn
+
+        # Move spatula to hand
+        p.resetBasePositionAndOrientation(spatula_id, spatula_pos, spatula_orn, physicsClientId=self.client_id)
+
+        # Create fixed constraint to attach spatula to hand
+        p.createConstraint(
+            parentBodyUniqueId=arm_state.body_id,
+            parentLinkIndex=arm_state.ee_link,
+            childBodyUniqueId=spatula_id,
+            childLinkIndex=-1,
+            jointType=p.JOINT_FIXED,
+            jointAxis=[0, 0, 0],
+            parentFramePosition=[0, 0, 0],  # you can tweak to align
+            childFramePosition=[0, 0, 0],
+            parentFrameOrientation=[0, 0, 0, 1],
+            childFrameOrientation=[0, 0, 0, 1],
+            physicsClientId=self.client_id,
+        )
 
     # ---------- Arm spawning ---------- #
 
@@ -432,35 +476,63 @@ class RobotChefSimulation:
         radius: float = 0.005,
         seed: int = 7,
     ) -> Optional[ParticleSet]:
-        bowl_entry = self.objects.get("bowl")
-        if not bowl_entry:
-            LOGGER.warning("Cannot spawn particles before bowl is created")
+        pan_entry = self.objects.get("pan")
+        if not pan_entry:
+            LOGGER.warning("Cannot spawn rice particles before pan is created")
             return None
-        bowl_id = bowl_entry["body_id"]
-        position, _ = p.getBasePositionAndOrientation(bowl_id, physicsClientId=self.client_id)
-        bowl_props = bowl_entry["properties"]
-        particle_set = spawn_spheres(
+        pan_id = pan_entry["body_id"]
+        position, _ = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.client_id)
+        pan_props = pan_entry["properties"]
+        print("pan_props", pan_props)
+        particle_set = spawn_particles(
             client_id=self.client_id,
             count=count,
             radius=radius,
             center=position,
-            bowl_radius=float(bowl_props["inner_radius"]),
-            bowl_height=float(bowl_props["inner_height"]),
-            spawn_height=float(bowl_props["spawn_height"]),
+            pan_radius=float(pan_props["inner_radius"]),
+            pan_height=float(pan_props["depth"]),
+            spawn_height=float(pan_props["spawn_height"]),
             seed=seed,
         )
-        self.particles = particle_set
+        self.rice_particles = particle_set
         LOGGER.info("Spawned %d rice particles (radius=%.4f)", particle_set.count, radius)
+        return particle_set
+    
+    def spawn_egg_particles(
+        self,
+        count: int,
+        radius: float = 0.005,
+        seed: int = 7,
+    ) -> Optional[ParticleSet]:
+        pan_entry = self.objects.get("pan")
+        if not pan_entry:
+            LOGGER.warning("Cannot spawn egg particles before pan is created")
+            return None
+        pan_id = pan_entry["body_id"]
+        position, _ = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.client_id)
+        pan_props = pan_entry["properties"]
+        particle_set = spawn_particles(
+            client_id=self.client_id,
+            count=count,
+            radius=radius,
+            center=position,
+            pan_radius=float(pan_props["inner_radius"]),
+            pan_height=float(pan_props["depth"]),
+            spawn_height=float(pan_props["spawn_height"]),
+            seed=seed,
+        )
+        self.egg_particles = particle_set
+        LOGGER.info("Spawned %d egg particles (radius=%.4f)", particle_set.count, radius)
         return particle_set
 
     def count_particles_in_pan(self) -> Dict[str, float]:
         pan_entry = self.objects.get("pan")
-        if not pan_entry or not self.particles:
+        if not pan_entry or not self.rice_particles:
             return {"total": 0, "in_pan": 0, "transfer_ratio": 0.0}
         pan_id = pan_entry["body_id"]
         center, _ = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.client_id)
         props = pan_entry["properties"]
-        total, inside, ratio = self.particles.count_in_pan(
+        total, inside, ratio = self.rice_particles.count_in_pan(
             client_id=self.client_id,
             center=center,
             inner_radius=float(props["inner_radius"]),

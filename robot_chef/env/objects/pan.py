@@ -145,6 +145,7 @@ def create_pan(
         "half_side": half_side,
         "base_height": pose.z,
         "lip_height": pose.z + depth,
+        "spawn_height": depth * 0.7,
         "depth": depth,
         "wall_thickness": wall_thickness,
         "handle_offset": handle_offset,
