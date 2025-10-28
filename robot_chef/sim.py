@@ -386,7 +386,7 @@ class Simulator:
         self._place_on_support("stove", support_top_z=table_top)
         self._place_on_support("bowl", support_top_z=table_top)
         self._place_on_support("pan", support_top_z=stove_top)
-        self._place_on_support("spatula", support_top_z=stove_top)
+        self._place_on_support("spatula", support_top_z=table_top)
         # update states
         pan_bottom = self._get_body_bottom_z("pan")
         self.objects["pan"]["properties"]["base_height"] = pan_bottom

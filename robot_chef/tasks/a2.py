@@ -39,26 +39,28 @@ class A2(Task):
 
         # move arm to spatula handle
         spatula_pos, spatula_orn = p.getBasePositionAndOrientation(spatula_id)
-        grasp_pos = np.array(spatula_pos) + np.array([0, 0, 0.05]) # define grasp slightly above handle
-        joint_pos = self._inverse_kinematics(arm, grasp_pos, spatula_orn)
+        grasp_pos = np.array(spatula_pos) + np.array([0, 0, 0.2]) # define grasp slightly above handle
+        _, _, spatula_yaw = p.getEulerFromQuaternion(spatula_orn)
+        ee_down_quat = p.getQuaternionFromEuler([math.pi, 0, spatula_yaw])
+        joint_pos = self._inverse_kinematics(arm, grasp_pos, ee_down_quat)
         self.sim.set_joint_positions(joint_pos, arm=arm)
         self.sim.step_simulation(steps=240)
 
         # grasp
-        # self.sim.gripper_close(arm="right")
-        # self.sim.step_simulation(steps=120)
-        # gripper_link = self.sim.right_arm.ee_link
-        # c_id = p.createConstraint(
-        #     parentBodyUniqueId=self.sim.right_arm.body_id,
-        #     parentLinkIndex=gripper_link,
-        #     childBodyUniqueId=spatula_id,
-        #     childLinkIndex=-1,
-        #     jointType=p.JOINT_FIXED,
-        #     jointAxis=[0, 0, 0],
-        #     parentFramePosition=[0, 0, 0],
-        #     childFramePosition=[0, 0, 0],
-        #     physicsClientId=self.sim.client_id,
-        # )
+        self.sim.gripper_close(arm="right")
+        self.sim.step_simulation(steps=120)
+        gripper_link = self.sim.right_arm.ee_link
+        c_id = p.createConstraint(
+            parentBodyUniqueId=self.sim.right_arm.body_id,
+            parentLinkIndex=gripper_link,
+            childBodyUniqueId=spatula_id,
+            childLinkIndex=-1,
+            jointType=p.JOINT_FIXED,
+            jointAxis=[0, 0, 0],
+            parentFramePosition=[0, 0, 0],
+            childFramePosition=[0, 0, 0],
+            physicsClientId=self.sim.client_id,
+        )
 
         # # stirring motion
         # pan_pos = p.getBasePositionAndOrientation(pan_id)[0]
