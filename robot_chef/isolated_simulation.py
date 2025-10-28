@@ -29,6 +29,7 @@ from .tasks.predict_grasp import Grasp_Predictor
 from .config import Pose6D, PourTaskConfig
 from .env.objects import pan as pan_factory
 from .env.objects import rice_bowl as bowl_factory
+from .env.objects import spatula as spatula
 from .env.particles import ParticleSet, spawn_spheres
 
 LOGGER = logging.getLogger(__name__)
@@ -150,6 +151,7 @@ class RobotChefSimulation:
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
         print(f"Creating bowl at pose: {bowl_pose}")
         bowl_id, props = bowl_factory.create_rounded_bowl(self.client_id, pose=bowl_pose)
+        #bowl_id = spatula.create_spatula(self.client_id, pose=bowl_pose)
         print(f"Bowl created with body id: {bowl_id}")
         aabb_min, aabb_max = p.getAABB(bowl_id, physicsClientId=self.client_id)
         print(f"Bowl AABB min: {aabb_min}, max: {aabb_max}")
@@ -164,7 +166,8 @@ class RobotChefSimulation:
         if "bowl" in self.objects:
             p.removeBody(self.objects["bowl"]["body_id"], physicsClientId=self.client_id)
             del self.objects["bowl"]
-        self.objects["bowl"] = {"body_id": bowl_id, "properties": props, "pose": bowl_pose}
+        #self.objects["bowl"] = {"body_id": bowl_id, "properties": props, "pose": bowl_pose}
+        self.objects["bowl"] = {"body_id": bowl_id, "pose": bowl_pose}
         ''' 
         pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
         pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
@@ -231,7 +234,7 @@ class RobotChefSimulation:
 
         # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
-        self.spawn_rice_particles(30)
+        #self.spawn_rice_particles(30)
 
         # Expose pan base height after snapping (useful for later metrics).
         #pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
