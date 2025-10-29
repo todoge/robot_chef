@@ -1,13 +1,3 @@
-"""Simulation harness for the Robot Chef pouring task.
-
-- Builds table, bowl, pan and a stove support block.
-- Uses AABB-based snapping so the stove sits on the table, the pan sits on the stove,
-  and the bowl sits on the table (deterministic contact layout).
-- Adds two fixed pedestals ("mounts") and places the Panda arms on their tops at
-  the table's top-Z, with XY positions computed from the table AABB + a safety margin,
-  so mounts never intersect the table, regardless of scene.world_yaw_deg.
-"""
-
 from __future__ import annotations
 
 import os
@@ -17,6 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 import pybullet as p
 import pybullet_data
@@ -51,12 +43,18 @@ class ArmState:
     joint_ranges: Tuple[float, ...]
     joint_rest: Tuple[float, ...]
 
+class Pose:
+    def __init__(self, x, y, z, orientation_rpy):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.orientation_rpy = orientation_rpy
 
 # --------------------------------------------------------------------------- #
 # Simulation
 
 
-class RobotChefSimulation:
+class RobotChefSimulation(gym.Env):
     """Encapsulates the physics world, robot arms, and task objects."""
 
     def __init__(self, gui: bool, recipe: PourTaskConfig):
@@ -73,40 +71,16 @@ class RobotChefSimulation:
         p.setTimeStep(self.dt, physicsClientId=self.client_id)
         p.setGravity(0.0, 0.0, -9.81, physicsClientId=self.client_id)
         p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client_id)
+        
+        self.max_steps = 1000
+        self.current_step = 0
+
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32)
+        space = 150
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(space,), dtype=np.float32)
 
         self.objects: Dict[str, Dict[str, object]] = {}
         self.particles: Optional[ParticleSet] = None
-        print("testing")
-
-        # Build environment (table, bowl, pan, stove) and snap with AABBs
-        self._setup_environment()
-
-        print("Finish setting up")
-
-        # Pedestals with collision-safe placement and arm mounting
-        left_mount_id, right_mount_id, z_table = self._place_pedestals_clear_of_table(
-            side=0.20,   # 20 cm square column
-            margin=0.08  # 8 cm clearance from table edges
-        )
-
-        print("Finish placing pedestals")
-        self.objects["left_mount"] = {"body_id": left_mount_id, "top_z": z_table}
-        self.objects["right_mount"] = {"body_id": right_mount_id, "top_z": z_table}
-
-        # Mount Panda arms on pedestal tops (useFixedBase=True), aligned with table yaw
-        yaw = math.radians(self.recipe.scene.world_yaw_deg)
-        left_base_pos, _ = p.getBasePositionAndOrientation(left_mount_id, physicsClientId=self.client_id)
-        right_base_pos, _ = p.getBasePositionAndOrientation(right_mount_id, physicsClientId=self.client_id)
-
-        self.left_arm = self._spawn_arm(
-            base_position=[left_base_pos[0], left_base_pos[1], z_table],
-            base_orientation=p.getQuaternionFromEuler([0.0, 0.0, yaw + math.pi / 2.0]),
-        )
-        self.right_arm = self._spawn_arm(
-            base_position=[right_base_pos[0], right_base_pos[1], z_table],
-            base_orientation=p.getQuaternionFromEuler([0.0, 0.0, yaw - math.pi / 2.0]),
-        )
-        print("Finish spawning arms")
 
         # Default active arm is the right arm for pouring motions.
         self._active_arm_name = "left"
@@ -119,6 +93,8 @@ class RobotChefSimulation:
         self.grasping_predictor = Grasp_Predictor()
         self.camera = None
         self.keyposes = None
+
+        self.saved_state_id = None
         
         # Grasp execution parameters
         self.RECALIBRATE_HEIGHT = 0.55  # Height above for predicting grasp processing
@@ -128,120 +104,194 @@ class RobotChefSimulation:
         self.FRAME_MARKER_URDF = os.path.join(os.path.dirname(os.path.realpath(__file__)), "env/frame_marker.urdf")
         self.eef_marker = p.loadURDF(self.FRAME_MARKER_URDF, [0, 0, 0], useFixedBase=True, globalScaling=0.18)
 
-    def _setup_environment(self) -> None:
-        LOGGER.info("Setting up environment objects")
-        plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
-        self.objects["plane"] = {"body_id": plane_id}
+    def reset(self, *, options=None, **kwargs) -> None:
+        print("Resetting...")
+        if self.saved_state_id is None:
+            LOGGER.info("Setting up environment objects")
+            plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
+            self.objects["plane"] = {"body_id": plane_id}
 
-        # Position the table; we’ll snap objects to its true top using AABB.
-        # The table URDF origin is commonly at the ground; we lift/pose it here.
-        table_height_offset = -0.05
-        table_pos = [0.5, 0.0, table_height_offset]
-        table_orientation = p.getQuaternionFromEuler([0.0, 0.0, math.radians(self.recipe.scene.world_yaw_deg)])
-        table_id = p.loadURDF(
-            "table/table.urdf",
-            basePosition=table_pos,
-            baseOrientation=table_orientation,
-            useFixedBase=True,
-            physicsClientId=self.client_id,
-        )
-        self.objects["table"] = {"body_id": table_id, "base_position": table_pos}
+            table_height_offset = -0.05
+            table_pos = [0.5, 0.0, table_height_offset]
+            table_orientation = p.getQuaternionFromEuler([0.0, 0.0, math.radians(self.recipe.scene.world_yaw_deg)])
+            table_id = p.loadURDF(
+                "table/table.urdf",
+                basePosition=table_pos,
+                baseOrientation=table_orientation,
+                useFixedBase=True,
+                physicsClientId=self.client_id,
+            )
+            self.objects["table"] = {"body_id": table_id, "base_position": table_pos}
+            # Pedestals with collision-safe placement and arm mounting
+            left_mount_id, right_mount_id, z_table = self._place_pedestals_clear_of_table(
+                side=0.20,   # 20 cm square column
+                margin=0.08  # 8 cm clearance from table edges
+            )
 
-        # Create bowl and pan at configured poses (apply world yaw).
-        bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
-        print(f"Creating bowl at pose: {bowl_pose}")
-        bowl_id, props = bowl_factory.create_rounded_bowl(self.client_id, pose=bowl_pose)
-        #bowl_id = spatula.create_spatula(self.client_id, pose=bowl_pose)
-        print(f"Bowl created with body id: {bowl_id}")
-        aabb_min, aabb_max = p.getAABB(bowl_id, physicsClientId=self.client_id)
-        print(f"Bowl AABB min: {aabb_min}, max: {aabb_max}")
-        visual_shapes = p.getVisualShapeData(bowl_id)
-        # Get collision shape data
-        collision_shapes = p.getCollisionShapeData(bowl_id, -1)
+            self.objects["left_mount"] = {"body_id": left_mount_id, "top_z": z_table}
+            self.objects["right_mount"] = {"body_id": right_mount_id, "top_z": z_table}
 
-        print("Visual shapes:", visual_shapes)
-        print("Collision shapes:", collision_shapes)
+            yaw = math.radians(self.recipe.scene.world_yaw_deg)
+            left_base_pos, _ = p.getBasePositionAndOrientation(left_mount_id, physicsClientId=self.client_id)
+            right_base_pos, _ = p.getBasePositionAndOrientation(right_mount_id, physicsClientId=self.client_id)
 
+            self.left_arm = self._spawn_arm(
+                base_position=[left_base_pos[0], left_base_pos[1], z_table],
+                base_orientation=p.getQuaternionFromEuler([0.0, 0.0, yaw + math.pi / 2.0]),
+            )
+            
+            z_table = self._get_table_top_z()
 
-        if "bowl" in self.objects:
-            p.removeBody(self.objects["bowl"]["body_id"], physicsClientId=self.client_id)
-            del self.objects["bowl"]
-        self.objects["bowl"] = {"body_id": bowl_id, "properties": props, "pose": bowl_pose}
-        #self.objects["bowl"] = {"body_id": bowl_id, "pose": bowl_pose}
-        ''' 
-        pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
-        pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
-        self.objects["pan"] = {"body_id": pan_id, "properties": pan_props, "pose": pan_pose}
+            bowl_1_pose = Pose(0,0,self._get_table_top_z(),[0,0,0])
+            bowl_1_id, bowl_1_params = bowl_factory.create_rounded_bowl(self.client_id, bowl_1_pose)
+            self.objects["bowl"] = {"body_id": bowl_1_id, "properties": bowl_1_params, "pose": bowl_1_pose}
+            self.spawn_rice_particles(20)
+            bowl_2_pose = Pose(0,0.3,self._get_table_top_z(),[0,0,0])
+            bowl_2_id, bowl_2_params = bowl_factory.create_rounded_bowl(self.client_id, bowl_2_pose)
+            self.objects["pouring_bowl"] = {"body_id": bowl_2_id, "properties": bowl_2_params, "pose": bowl_2_pose}
+
+            p.stepSimulation(physicsClientId=self.client_id)
+
+            down_orn = p.getQuaternionFromEuler([math.pi, 0, 0])
+            self.move_arm_to_pose("left", [0,0,1.0], down_orn, max_secs=5.0)
+            ee_pos, ee_orn = self.get_eef_state("left")
+            self.setup_camera(ee_pos, ee_orn)
+            self.gripper_open(arm="left")
+            ee_pos, ee_orn = self.get_eef_state("left")
+            self.setup_camera(ee_pos, ee_orn)
+            rgb, depth_buffer, depth_norm, _= self.camera.get_rgbd()
+            pixel_row, pixel_col, grasp_angle, grasp_width, quality, quality_map, angle_map, width_map = self.grasping_predictor.predict_grasp(depth_norm)
+            #self.grasping_predictor.visualize_grasp_predictions(depth_norm, quality_map, angle_map, width_map, pixel_row, pixel_col, "grasp_visualisation_recali.png")
+            coord = self.pixel_to_world(pixel_row, pixel_col, depth_buffer)
+            self.set_grasping_keyposes(coord)
+            self.move_arm_to_pose("left", self.keyposes["pregrasp"], down_orn, max_secs=3.0)
+            grasp_euler = [math.pi, 0, grasp_angle]
+            grasp_orn = p.getQuaternionFromEuler(grasp_euler)
+            self.move_gripper_straight_down(self.keyposes["pregrasp"], self.keyposes["grasp"], grasp_orn, "left")
+            self.gripper_close(arm="left", force=200.0)
+            self.move_arm_to_pose("left", self.keyposes["lift"], down_orn, max_secs=3.0)
+            self.saved_state_id = p.saveState()
+        else:
+            p.restoreState(self.saved_state_id)
+            self.current_step = 0
+
+        obs = self.get_obs()
+        info = {}
+        return obs, info
+
+    def step(self, action):
+        arm = self._get_arm("left")
+        joint_limits = [
+            (-2.8973, 2.8973),
+            (-1.7628, 1.7628),
+            (-2.8973, 2.8973),
+            (-3.0718, -0.0698),
+            (-2.8973, 2.8973),
+            (-0.0175, 3.7525),
+            (-2.8973, 2.8973),
+        ]
+        denorm_action = []
+        for i, a in enumerate(action):
+            low, high = joint_limits[i]
+            # Scale from [-1,1] to [low, high]
+            scaled = low + (a + 1.0) * 0.5 * (high - low)
+            denorm_action.append(scaled)
+        for idx in range(7):
+            # Map action[idx] from [-1,1] to joint limit range (example)
+            # You need to define real joint limits here for safety
+            target_pos = denorm_action[idx]  # example scaling
+            p.setJointMotorControl2(arm.body_id, idx, p.POSITION_CONTROL, targetPosition=target_pos, maxVelocity=1.0, force=80)
+
+        p.stepSimulation()
+        self.current_step += 1
+
+        obs = self.get_obs()
+        reward = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2) * 10.0 - self._count_balls_in_target_bowl(self.objects["bowl"]["properties"], 1) * 1.0
+
+        truncated = self.current_step >= self.max_steps 
+        terminated = self._count_balls_in_target_bowl(self.objects["bowl"]["properties"], 1) == 0
+
+        ee_pos, _ = self.get_eef_state("left")
+        bowl_one_pos, _ = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
+        distance = np.linalg.norm(np.array(ee_pos) - np.array(bowl_one_pos))
+        if distance > 0.1:
+            terminated = True
+            reward = - 100
         
-        # Build a stove “support block” sized from pan props (visual + contact stability).
-        stove_half_xy = float(pan_props["half_side"]) + float(pan_props["wall_thickness"]) + 0.02
-        stove_height = float(max(0.01, float(pan_props["depth"]) * 0.9))
-        stove_half_extent = (stove_half_xy, stove_half_xy, stove_height / 2.0)
+        info = {}
+        return obs, reward, terminated, truncated, info
 
-        # Initial pose; we’ll snap to table, then rest pan on stove.
-        stove_pose = Pose6D(
-            x=pan_pose.x,
-            y=pan_pose.y,
-            z=pan_pose.z - stove_height,  # provisional, corrected by snapping
-            roll=0.0,
-            pitch=0.0,
-            yaw=pan_pose.yaw,
+    def get_obs(self, arm="left"):
+        arm = self._get_arm(arm)
+        joint_positions = [p.getJointState(arm.body_id, i)[0] for i in range(7)]
+        joint_velocities = [p.getJointState(arm.body_id, i)[1] for i in range(7)]
+        bowl_one_pos, bowl_one_orn = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
+        bowl_two_pos, bowl_two_orn = p.getBasePositionAndOrientation(self.objects["pouring_bowl"]["body_id"])
+        balls_states = []
+        balls = self.particles.body_ids
+        for i in range(20):
+            if i < len(balls):
+                ball_id = balls[i]
+                pos, _ = p.getBasePositionAndOrientation(ball_id)
+                lin_vel, _ = p.getBaseVelocity(ball_id)
+                balls_states.extend(list(pos) + list(lin_vel))
+            else:
+                balls_states.extend([0.0] * 6)
+        balls_poured = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
+        elapsed_steps = self.current_step
+        obs = np.array(
+            joint_positions +
+            joint_velocities +
+            list(bowl_one_pos) + list(bowl_one_orn) +
+            list(bowl_two_pos) + list(bowl_two_orn) +
+            balls_states +
+            [balls_poured, elapsed_steps],
+            dtype=np.float32
         )
-        stove_orientation = p.getQuaternionFromEuler(stove_pose.orientation_rpy)
-        stove_collision = p.createCollisionShape(
-            p.GEOM_BOX,
-            halfExtents=stove_half_extent,
-            physicsClientId=self.client_id,
-        )
-        stove_visual = p.createVisualShape(
-            p.GEOM_BOX,
-            halfExtents=stove_half_extent,
-            rgbaColor=[0.96, 0.96, 0.96, 1.0],
-            physicsClientId=self.client_id,
-        )
-        stove_id = p.createMultiBody(
-            baseMass=0.0,
-            baseCollisionShapeIndex=stove_collision,
-            baseVisualShapeIndex=stove_visual,
-            basePosition=[stove_pose.x, stove_pose.y, stove_pose.z],
-            baseOrientation=stove_orientation,
-            physicsClientId=self.client_id,
-        )
-        p.changeDynamics(
-            stove_id,
-            -1,
-            lateralFriction=1.1,
-            spinningFriction=0.9,
-            rollingFriction=0.6,
-            physicsClientId=self.client_id,
-        )
-        self.objects["stove_block"] = {
-            "body_id": stove_id,
-            "half_extents": stove_half_extent,
-            "pose": stove_pose,
-        }
-        '''
+
+        return obs
         
-        # --- Deterministic placement using AABBs ---
-        z_table = self._get_table_top_z()
-        print(f"Placing bowl on support at Z={z_table}")
-        # 1) Stove rests on TABLE
-        #self._place_on_support(stove_id, support_top_z=z_table)
+    def _count_balls_in_target_bowl(self, bowl_params, bowl):
+        count = 0
+        bowl_pos = None
+        if bowl == 1:
+            bowl_pos, _ = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
+        else:
+            bowl_pos, _ = p.getBasePositionAndOrientation(self.objects["pouring_bowl"]["body_id"])
+            
+        bowl_pos = np.array(bowl_pos)
 
-        # 2) Pan rests on STOVE
-        #stove_top = self._get_body_top_z(stove_id)
-        #self._place_on_support(pan_id, support_top_z=stove_top)
+        # Unpack bowl parameters (all assumed scaled and in world units)
+        total_height = bowl_params["inner_height"] + bowl_params["base_thickness"]
+        inner_radius = bowl_params["inner_radius"]
 
-        # 3) Bowl rests on TABLE
-        self._place_on_support(bowl_id, support_top_z=z_table)
-        self.spawn_rice_particles(30)
+        # Calculate vertical boundaries relative to bowl center position
+        bowl_bottom_z = bowl_pos[2] - (total_height / 2)
+        bowl_top_z = bowl_pos[2] + (total_height / 2)
 
-        # Expose pan base height after snapping (useful for later metrics).
-        #pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
-        #pan_props["base_height"] = float(pan_aabb_min[2])
+        # Define a radius threshold (inner radius of bowl) for horizontal check
+        radius_threshold = inner_radius
 
-        # Let contacts settle for one frame (visual nicety).
-        p.stepSimulation(physicsClientId=self.client_id)
+        for ball_id in self.particles.body_ids:
+            ball_pos, _ = p.getBasePositionAndOrientation(ball_id)
+            ball_pos = np.array(ball_pos)
+
+            # Horizontal distance in XY plane from bowl center
+            dist_xy = np.linalg.norm(ball_pos[:2] - bowl_pos[:2])
+
+            # Check ball inside bowl horizontal radius and between bottom and top Z
+            if dist_xy <= radius_threshold and bowl_bottom_z <= ball_pos[2] <= bowl_top_z:
+                count += 1
+
+        return count
+
+    
+    def render(self):
+        # Optional slow down for visualization
+        time.sleep(1./240.)  # Sleep for one simulation timestep (default 240 Hz)
+    
+    def close(self):
+        p.disconnect(self.physics_client)
 
     # ---------- Mounts / pedestals with clearance ---------- #
 
@@ -513,7 +563,7 @@ class RobotChefSimulation:
     def spawn_rice_particles(
         self,
         count: int,
-        radius: float = 0.005,
+        radius: float = 0.0075,
         seed: int = 7,
     ) -> Optional[ParticleSet]:
         bowl_entry = self.objects.get("bowl")
@@ -614,6 +664,13 @@ class RobotChefSimulation:
     def _place_on_table(self, body_id: int, z_table: float) -> None:
         self._place_on_support(body_id, support_top_z=z_table)
 
+    def spawn_one_keypose_markers(self, pos, name, scale=0.1):
+      down_orn = p.getQuaternionFromEuler([math.pi, 0, 0]) #gripper to look down
+      p.loadURDF(self.FRAME_MARKER_URDF, pos, down_orn, useFixedBase=True, globalScaling=scale)
+      # Add text above the frame
+      text_pos = [pos[0], pos[1], pos[2] + 0.01]
+      p.addUserDebugText(name, text_pos, textColorRGB=[1, 1, 0], textSize=1.2)
+
     # Tutorial code to spawn markers for visualisation
     def _spawn_keypose_markers(self, scale=0.1):
       for name, pos in self.keyposes.items():
@@ -646,7 +703,7 @@ class RobotChefSimulation:
     def set_grasping_keyposes(self, grasp_pos_world):
       pregrasp = [grasp_pos_world[0], grasp_pos_world[1], grasp_pos_world[2] + self.APPROACH_HEIGHT]
       grasp_pose = [grasp_pos_world[0], grasp_pos_world[1], grasp_pos_world[2] + self.GRASP_CLEARANCE]
-      lift_pose = [grasp_pos_world[0], grasp_pos_world[1], grasp_pos_world[2] + self.LIFT_HEIGHT]
+      lift_pose = [-0.05, 0.4, grasp_pos_world[2] + self.LIFT_HEIGHT]
 
       self.keyposes = {
           "pregrasp": pregrasp,
@@ -661,9 +718,9 @@ class RobotChefSimulation:
                      target_pos: List[float],
                      target_orn: Tuple[float, float, float, float],
                      max_secs=2.0,
-                     pos_gain=0.6,
-                     vel_gain=1.5,
-                     torque=300):
+                     pos_gain=0.3,
+                     vel_gain=1.0,
+                     torque=200):
         """IK + PD stepper until EE is near target or timeout."""
         arm = self._get_arm(arm)
         max_steps = int(max_secs / self.dt)

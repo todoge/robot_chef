@@ -35,7 +35,7 @@ def main():
     #sim.grasping_predictor.visualize_grasp_predictions(depth_norm, quality_map, angle_map, width_map, pixel_row, pixel_col)
     coord = sim.pixel_to_world(center_coord[0], center_coord[1], depth_buffer)
     sim.set_recalibration_keypose(coord)
-    sim.move_arm_to_pose("left", sim.keyposes["recalibration"], down_orn, max_secs=5.0)
+    sim.move_arm_to_pose("left", sim.keyposes["recalibration"], down_orn, max_secs=3.0)
     sim.gripper_open(arm="left")
     ee_pos, ee_orn = sim.get_eef_state("left")
     sim.setup_camera(ee_pos, ee_orn)
@@ -44,12 +44,14 @@ def main():
     sim.grasping_predictor.visualize_grasp_predictions(depth_norm, quality_map, angle_map, width_map, pixel_row, pixel_col, "grasp_visualisation_recali.png")
     coord = sim.pixel_to_world(pixel_row, pixel_col, depth_buffer)
     sim.set_grasping_keyposes(coord)
-    sim.move_arm_to_pose("left", sim.keyposes["pregrasp"], down_orn, max_secs=4.0)
+    sim.move_arm_to_pose("left", sim.keyposes["pregrasp"], down_orn, max_secs=3.0)
     grasp_euler = [math.pi, 0, grasp_angle]
     grasp_orn = p.getQuaternionFromEuler(grasp_euler)
     sim.move_gripper_straight_down(sim.keyposes["pregrasp"], sim.keyposes["grasp"], grasp_orn, "left")
     sim.gripper_close(arm="left", force=200.0)
-    sim.move_arm_to_pose("left", sim.keyposes["lift"], grasp_orn, max_secs=4.0)
+    sim.move_arm_to_pose("left", sim.keyposes["lift"], down_orn, max_secs=3.0)
+    pour_orn = p.getQuaternionFromEuler([-math.pi/2, 0, 0])
+    sim.move_arm_to_pose("left", sim.keyposes["lift"], pour_orn, max_secs=4.0)
 
 
     #task = PourBowlIntoPanAndReturn()
