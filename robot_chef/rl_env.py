@@ -100,7 +100,7 @@ class RobotChefSimulation(gym.Env):
         self.RECALIBRATE_HEIGHT = 0.55  # Height above for predicting grasp processing
         self.APPROACH_HEIGHT = 0.35  # Height above object for pre-grasp
         self.GRASP_CLEARANCE = 0.1  # Clearance when grasping
-        self.LIFT_HEIGHT = 0.35      # Height to lift object to
+        self.LIFT_HEIGHT = 0.25      # Height to lift object to
         self.FRAME_MARKER_URDF = os.path.join(os.path.dirname(os.path.realpath(__file__)), "env/frame_marker.urdf")
         self.eef_marker = p.loadURDF(self.FRAME_MARKER_URDF, [0, 0, 0], useFixedBase=True, globalScaling=0.18)
 
@@ -170,6 +170,7 @@ class RobotChefSimulation(gym.Env):
             self.move_gripper_straight_down(self.keyposes["pregrasp"], self.keyposes["grasp"], grasp_orn, "left")
             self.gripper_close(arm="left", force=200.0)
             self.move_arm_to_pose("left", self.keyposes["lift"], down_orn, max_secs=3.0)
+            self.spawn_one_keypose_markers([0,0,self._get_table_top_z() + 0.05], "Poured thresh")
             self.saved_state_id = p.saveState()
         else:
             p.restoreState(self.saved_state_id)
@@ -206,17 +207,34 @@ class RobotChefSimulation(gym.Env):
         self.current_step += 1
 
         obs = self.get_obs()
-        reward = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2) * 10.0 - self._count_balls_in_target_bowl(self.objects["bowl"]["properties"], 1) * 1.0
+        balls_poured_correctly = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
+        balls_poured = self._count_balls_poured()
+        balls_poured_wrongly = balls_poured - balls_poured_correctly
+        reward = balls_poured_correctly * 10 - balls_poured_wrongly * 5
 
         truncated = self.current_step >= self.max_steps 
-        terminated = self._count_balls_in_target_bowl(self.objects["bowl"]["properties"], 1) == 0
+        if truncated:
+            print("[Truncated] Steps used up")
+        terminated = self._count_balls_poured() == 20
+        if terminated:
+            print("[Terminated] All balls are poured")
 
         ee_pos, _ = self.get_eef_state("left")
         bowl_one_pos, _ = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
+        bowl_two_pos, _ = p.getBasePositionAndOrientation(self.objects["pouring_bowl"]["body_id"])
+        dist_between_bowls = np.sqrt((bowl_one_pos[0] - bowl_two_pos[0])**2 + (bowl_one_pos[1] - bowl_two_pos[1])**2)
+        if dist_between_bowls > 0.2 or abs(bowl_one_pos[2] - bowl_two_pos[2]) > 0.3 :
+            reward -= 10
         distance = np.linalg.norm(np.array(ee_pos) - np.array(bowl_one_pos))
-        if distance > 0.1:
+        if distance > 0.15:
             terminated = True
-            reward = - 100
+            reward = -100
+            print("[Terminate] Not grasping bowl anymore")
+
+        reward -= self.current_step * 0.1
+
+        if terminated or truncated:
+            print(f"[Result for episode] {balls_poured_correctly} in target bowl")
         
         info = {}
         return obs, reward, terminated, truncated, info
@@ -251,6 +269,16 @@ class RobotChefSimulation(gym.Env):
 
         return obs
         
+    def _count_balls_poured(self):
+        count = 0
+        table_height = self._get_table_top_z()
+        for ball_id in self.particles.body_ids:
+            ball_pos, _ = p.getBasePositionAndOrientation(ball_id)
+            if ball_pos[2] < table_height + 0.05:
+                count += 1
+        return count
+
+
     def _count_balls_in_target_bowl(self, bowl_params, bowl):
         count = 0
         bowl_pos = None
