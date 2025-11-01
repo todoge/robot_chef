@@ -206,32 +206,62 @@ class RobotChefSimulation(gym.Env):
         p.stepSimulation()
         self.current_step += 1
 
+        reward = 0.0
+        terminated = False
+        truncated =False
+
         obs = self.get_obs()
         balls_poured_correctly = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
         balls_poured = self._count_balls_poured()
         balls_poured_wrongly = balls_poured - balls_poured_correctly
-        reward = balls_poured_correctly * 10 - balls_poured_wrongly * 5
+        reward += balls_poured_correctly * 2.0
+        reward -= balls_poured_wrongly * 1.0
+        if balls_poured_correctly == 20:
+            reward += 50.0
+        
+        if balls_poured == 20:
+            terminated = True
 
         truncated = self.current_step >= self.max_steps 
         if truncated:
             print("[Truncated] Steps used up")
-        terminated = self._count_balls_poured() == 20
         if terminated:
             print("[Terminated] All balls are poured")
 
         ee_pos, _ = self.get_eef_state("left")
-        bowl_one_pos, _ = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
+        bowl_one_pos, bowl_one_orn = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
         bowl_two_pos, _ = p.getBasePositionAndOrientation(self.objects["pouring_bowl"]["body_id"])
-        dist_between_bowls = np.sqrt((bowl_one_pos[0] - bowl_two_pos[0])**2 + (bowl_one_pos[1] - bowl_two_pos[1])**2)
-        if dist_between_bowls > 0.2 or abs(bowl_one_pos[2] - bowl_two_pos[2]) > 0.3 :
-            reward -= 10
+        dist_between_bowls_xy = np.sqrt((bowl_one_pos[0] - bowl_two_pos[0])**2 + (bowl_one_pos[1] - bowl_two_pos[1])**2)
+        
+        if dist_between_bowls_xy < 0.2:
+            reward += (0.2 - dist_between_bowls_xy) / 0.2
+        else:
+            reward -= min((dist_between_bowls_xy - 0.2) * 2.0, 5.0)
+        
+        height_diff = abs(bowl_one_pos[2] - bowl_two_pos[2])
+        if height_diff > 0.3 :
+            reward -= min(height_diff * 2.0, 3.0)
+        else:
+            reward += 0.5
+
+        bowl_euler = p.getEulerFromQuaternion(bowl_one_orn)
+        tilt_angle = abs(bowl_euler[0]) + abs(bowl_euler[1])
+        if dist_between_bowls_xy < 0.2:
+            if tilt_angle > 0.3:
+                reward += min(tilt_angle * 2.0, 2.0)
+            else:
+                reward -= 0.2
+
+        if dist_between_bowls_xy > 0.3 and tilt_angle > 0.5:
+            reward -= 1.0
+
         distance = np.linalg.norm(np.array(ee_pos) - np.array(bowl_one_pos))
         if distance > 0.15:
             terminated = True
-            reward = -100
+            reward -= 20
             print("[Terminate] Not grasping bowl anymore")
 
-        reward -= self.current_step * 0.1
+        reward -=  0.2
 
         if terminated or truncated:
             print(f"[Result for episode] {balls_poured_correctly} in target bowl")
@@ -491,7 +521,7 @@ class RobotChefSimulation(gym.Env):
             pos, orn = p.getLinkState(arm.body_id, arm.eef)[4:6]
             p.resetBasePositionAndOrientation(self.eef_marker, pos, orn)
         p.stepSimulation()
-        time.sleep(1./240.)
+        #time.sleep(1./240.) #removed for rl
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -771,7 +801,7 @@ class RobotChefSimulation(gym.Env):
                 p.resetBasePositionAndOrientation(self.eef_marker, pos, orn)
 
             p.stepSimulation()
-            time.sleep(self.dt)
+            #time.sleep(self.dt) #removed for rl
 
             pos, orn = p.getLinkState(arm.body_id, arm.eef)[4:6]
             pos_err = np.linalg.norm(np.array(pos) - np.array(target_pos))
@@ -831,7 +861,7 @@ class RobotChefSimulation(gym.Env):
           joint_pos = p.calculateInverseKinematics(arm.body_id, arm.eef, pos, orn)[:-2]
           p.setJointMotorControlArray(arm.body_id, arm.joint_indices, p.POSITION_CONTROL, joint_pos)
           p.stepSimulation()
-          time.sleep(self.dt) # [IMPT]: reduce jumping of joints for real life time simulation
+          #time.sleep(self.dt) # [IMPT]: reduce jumping of joints for real life time simulation, removed for rl
 
 
 __all__ = ["RobotChefSimulation", "ArmState"]

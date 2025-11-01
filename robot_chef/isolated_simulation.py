@@ -25,6 +25,7 @@ from .camera import Camera
 
 from .tasks.detect_object import Object_Detector
 from .tasks.predict_grasp import Grasp_Predictor
+#from .gqcnn import get_gqcnn
 
 from .config import Pose6D, PourTaskConfig
 from .env.objects import pan as pan_factory
@@ -64,7 +65,7 @@ class RobotChefSimulation:
         self.gui = gui
         self.client_id = p.connect(p.GUI if gui else p.DIRECT)
 
-        #p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 1)
+        p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 1)
         LOGGER.info("Connected to PyBullet with client_id=%s (gui=%s)", self.client_id, gui)
 
         self.dt = 1.0 / 240.0
@@ -117,11 +118,12 @@ class RobotChefSimulation:
         self.IMG_HEIGHT = 224
         self.obj_detector = Object_Detector((self.IMG_WIDTH, self.IMG_HEIGHT))
         self.grasping_predictor = Grasp_Predictor()
+        self.gqcnn = get_gqcnn()
         self.camera = None
         self.keyposes = None
         
         # Grasp execution parameters
-        self.RECALIBRATE_HEIGHT = 0.55  # Height above for predicting grasp processing
+        self.RECALIBRATE_HEIGHT = 0.65  # Height above for predicting grasp processing
         self.APPROACH_HEIGHT = 0.35  # Height above object for pre-grasp
         self.GRASP_CLEARANCE = 0.1  # Clearance when grasping
         self.LIFT_HEIGHT = 0.35      # Height to lift object to
@@ -234,7 +236,7 @@ class RobotChefSimulation:
 
         # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
-        self.spawn_rice_particles(30)
+        #self.spawn_rice_particles(30)
 
         # Expose pan base height after snapping (useful for later metrics).
         #pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)

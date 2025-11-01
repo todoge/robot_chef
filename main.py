@@ -4,6 +4,8 @@ import argparse, logging, sys
 from pathlib import Path
 import math
 import pybullet as p
+import numpy as np
+import cv2
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Robot Chef")
@@ -40,6 +42,19 @@ def main():
     ee_pos, ee_orn = sim.get_eef_state("left")
     sim.setup_camera(ee_pos, ee_orn)
     rgb, depth_buffer, depth_norm, _= sim.camera.get_rgbd()
+    '''
+    print("Depth min and max:", np.min(depth_norm), np.max(depth_norm))
+    np.savetxt("depth.csv", depth_norm, delimiter=",")
+    print("[DEPTH SHAPE]", depth_norm.shape)
+    depth_image = cv2.resize(depth_norm, (96, 96), interpolation=cv2.INTER_LINEAR)
+    depth_image = np.expand_dims(depth_image, axis=-1)
+    image_arr = np.expand_dims(depth_image, axis=0)
+    gripper_width = 0.08
+    pose_arr = np.array([[gripper_width]])
+    output = sim.gqcnn.predict(image_arr, pose_arr)
+    print("[GQCNN Prediction]", output)
+    print("[Prediction Shape]", output.shape)
+    '''
     pixel_row, pixel_col, grasp_angle, grasp_width, quality, quality_map, angle_map, width_map = sim.grasping_predictor.predict_grasp(depth_norm)
     sim.grasping_predictor.visualize_grasp_predictions(depth_norm, quality_map, angle_map, width_map, pixel_row, pixel_col, "grasp_visualisation_recali.png")
     coord = sim.pixel_to_world(pixel_row, pixel_col, depth_buffer)
