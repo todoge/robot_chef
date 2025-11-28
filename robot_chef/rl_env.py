@@ -176,6 +176,10 @@ class RobotChefSimulation(gym.Env):
             p.restoreState(self.saved_state_id)
             self.current_step = 0
 
+        self.start_pouring = False
+        self.time_since_last_pour = 0
+        self.balls_since_last_pour = 20
+
         obs = self.get_obs()
         info = {}
         return obs, info
@@ -214,8 +218,8 @@ class RobotChefSimulation(gym.Env):
         balls_poured_correctly = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
         balls_poured = self._count_balls_poured()
         balls_poured_wrongly = balls_poured - balls_poured_correctly
-        reward += balls_poured_correctly * 2.0
-        reward -= balls_poured_wrongly * 1.0
+        reward += balls_poured_correctly * 6.0
+        reward -= balls_poured_wrongly * 3.0
         if balls_poured_correctly == 20:
             reward += 50.0
         
@@ -234,13 +238,13 @@ class RobotChefSimulation(gym.Env):
         dist_between_bowls_xy = np.sqrt((bowl_one_pos[0] - bowl_two_pos[0])**2 + (bowl_one_pos[1] - bowl_two_pos[1])**2)
         
         if dist_between_bowls_xy < 0.2:
-            reward += (0.2 - dist_between_bowls_xy) / 0.2
+            reward += ((0.2 - dist_between_bowls_xy) / 0.2) * 2.0
         else:
-            reward -= min((dist_between_bowls_xy - 0.2) * 2.0, 5.0)
+            reward -= min((dist_between_bowls_xy - 0.2) * 5.0, 10.0)
         
         height_diff = abs(bowl_one_pos[2] - bowl_two_pos[2])
-        if height_diff > 0.3 :
-            reward -= min(height_diff * 2.0, 3.0)
+        if height_diff > 0.25 or height_diff < 0.07 :
+            reward -= min(height_diff * 30.0, 25.0)
         else:
             reward += 0.5
 
@@ -253,7 +257,11 @@ class RobotChefSimulation(gym.Env):
                 reward -= 0.2
 
         if dist_between_bowls_xy > 0.3 and tilt_angle > 0.5:
-            reward -= 1.0
+            reward -= 12.0
+
+        bowl_collision = self.check_bowl_collision()
+        if bowl_collision:
+            reward -= 15.0
 
         distance = np.linalg.norm(np.array(ee_pos) - np.array(bowl_one_pos))
         if distance > 0.15:
@@ -262,6 +270,24 @@ class RobotChefSimulation(gym.Env):
             print("[Terminate] Not grasping bowl anymore")
 
         reward -=  0.2
+        if self.current_step > 500:
+            reward -= (self.current_step - 500) * 0.2
+
+
+        balls_poured = self._count_balls_in_target_bowl(self.objects["bowl"]["properties"], 1)
+
+        if self.start_pouring and balls_poured < self.balls_since_last_pour:
+            reward += 5.0
+            self.balls_since_last_pour = balls_poured
+            self.time_since_last_pour = 0
+        elif self.start_pouring and self.time_since_last_pour > 8:
+            reward -= (2.0 + (self.time_since_last_pour - 8) * 0.2)
+            self.time_since_last_pour += 1
+        elif self.start_pouring:
+            self.time_since_last_pour += 1
+
+        if balls_poured < 20:
+            self.start_pouring = True
 
         if terminated or truncated:
             print(f"[Result for episode] {balls_poured_correctly} in target bowl")
@@ -274,15 +300,19 @@ class RobotChefSimulation(gym.Env):
         joint_positions = [p.getJointState(arm.body_id, i)[0] for i in range(7)]
         joint_velocities = [p.getJointState(arm.body_id, i)[1] for i in range(7)]
         bowl_one_pos, bowl_one_orn = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
+        rel_pos = bowl_one_pos - bowl_two_pos
         bowl_two_pos, bowl_two_orn = p.getBasePositionAndOrientation(self.objects["pouring_bowl"]["body_id"])
+        bowl_two_orn_inv = p.getQuaternionInverse(bowl_two_orn)
+        rel_orn = p.multiplyTransforms([0,0,0], bowl_one_orn, [0,0,0], bowl_two_orn_inv)[1]
         balls_states = []
         balls = self.particles.body_ids
         for i in range(20):
             if i < len(balls):
                 ball_id = balls[i]
                 pos, _ = p.getBasePositionAndOrientation(ball_id)
+                ball_rel_pos = pos - bowl_two_pos
                 lin_vel, _ = p.getBaseVelocity(ball_id)
-                balls_states.extend(list(pos) + list(lin_vel))
+                balls_states.extend(list(ball_rel_pos) + list(lin_vel))
             else:
                 balls_states.extend([0.0] * 6)
         balls_poured = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
@@ -290,14 +320,23 @@ class RobotChefSimulation(gym.Env):
         obs = np.array(
             joint_positions +
             joint_velocities +
-            list(bowl_one_pos) + list(bowl_one_orn) +
-            list(bowl_two_pos) + list(bowl_two_orn) +
+            list(rel_pos) +
+            list(rel_orn) +
             balls_states +
             [balls_poured, elapsed_steps],
             dtype=np.float32
         )
 
         return obs
+
+    def check_bowl_collision(self):
+        contact_points = p.getContactPoints(
+            bodyA=self.objects["bowl"]["body_id"],
+            bodyB=self.objects["pouring_bowl"]["body_id"],
+            physicsClientId=self.client_id
+        )
+
+        return len(contact_points) > 0
         
     def _count_balls_poured(self):
         count = 0
