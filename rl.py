@@ -31,7 +31,8 @@ model = SAC(
         ent_coef='auto',
         seed=42
     )
-
+#model = SAC.load("models_run_6/franka_sac_2500000_steps.zip")
+#model.set_env(env)
 checkpoint_callback = CheckpointCallback(save_freq=10000, save_path='./models/', name_prefix='franka_sac')
     
 # 4. Start learning (training)

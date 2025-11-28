@@ -75,8 +75,8 @@ class RobotChefSimulation(gym.Env):
         self.max_steps = 1000
         self.current_step = 0
 
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32)
-        space = 150
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
+        space = 129
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(space,), dtype=np.float32)
 
         self.objects: Dict[str, Dict[str, object]] = {}
@@ -181,12 +181,13 @@ class RobotChefSimulation(gym.Env):
         self.balls_since_last_pour = 20
 
         obs = self.get_obs()
+        #print("[LENGTH OF NEW STATE SPACE]", len(obs))
         info = {}
         return obs, info
 
     def step(self, action):
         arm = self._get_arm("left")
-        joint_limits = [
+        '''joint_limits = [
             (-2.8973, 2.8973),
             (-1.7628, 1.7628),
             (-2.8973, 2.8973),
@@ -206,7 +207,35 @@ class RobotChefSimulation(gym.Env):
             # You need to define real joint limits here for safety
             target_pos = denorm_action[idx]  # example scaling
             p.setJointMotorControl2(arm.body_id, idx, p.POSITION_CONTROL, targetPosition=target_pos, maxVelocity=1.0, force=80)
+        '''
+        max_pos_delta = 0.3
+        max_orn_delta = 1
+        dx = action[0] * max_pos_delta
+        dy = action[1] * max_pos_delta
+        dz = action[2] * max_pos_delta
 
+        d_roll  = action[3] * max_orn_delta
+        d_pitch = action[4] * max_orn_delta
+        d_yaw   = action[5] * max_orn_delta
+
+        d_quat = p.getQuaternionFromEuler([d_roll, d_pitch, d_yaw])
+        ee_pos, ee_orn = self.get_eef_state("left")
+        target_ee_pos = [ee_pos[0]+dx, ee_pos[1]+dy, ee_pos[2]+dz]
+        target_ee_ori = p.multiplyTransforms([0,0,0], ee_orn, [0,0,0], d_quat)[1]
+
+        joint_angles = p.calculateInverseKinematics(
+            arm.body_id, arm.eef, target_ee_pos, target_ee_ori
+        )
+
+        for idx in range(7):
+            p.setJointMotorControl2(
+                arm.body_id,
+                idx,
+                controlMode=p.POSITION_CONTROL,
+                targetPosition=joint_angles[idx],
+                force=80,
+                maxVelocity=1.0
+            )
         p.stepSimulation()
         self.current_step += 1
 
@@ -273,7 +302,6 @@ class RobotChefSimulation(gym.Env):
         if self.current_step > 500:
             reward -= (self.current_step - 500) * 0.2
 
-
         balls_poured = self._count_balls_in_target_bowl(self.objects["bowl"]["properties"], 1)
 
         if self.start_pouring and balls_poured < self.balls_since_last_pour:
@@ -297,20 +325,19 @@ class RobotChefSimulation(gym.Env):
 
     def get_obs(self, arm="left"):
         arm = self._get_arm(arm)
-        joint_positions = [p.getJointState(arm.body_id, i)[0] for i in range(7)]
-        joint_velocities = [p.getJointState(arm.body_id, i)[1] for i in range(7)]
+        #joint_positions = [p.getJointState(arm.body_id, i)[0] for i in range(7)]
+        #joint_velocities = [p.getJointState(arm.body_id, i)[1] for i in range(7)]
         bowl_one_pos, bowl_one_orn = p.getBasePositionAndOrientation(self.objects["bowl"]["body_id"])
-        rel_pos = bowl_one_pos - bowl_two_pos
         bowl_two_pos, bowl_two_orn = p.getBasePositionAndOrientation(self.objects["pouring_bowl"]["body_id"])
-        bowl_two_orn_inv = p.getQuaternionInverse(bowl_two_orn)
-        rel_orn = p.multiplyTransforms([0,0,0], bowl_one_orn, [0,0,0], bowl_two_orn_inv)[1]
+        bowl_two_pos_inv, bowl_two_orn_inv = p.invertTransform(bowl_two_pos, bowl_two_orn)
+        rel_pos, rel_orn = p.multiplyTransforms(bowl_two_pos_inv, bowl_two_orn_inv, bowl_one_pos, bowl_one_orn)
         balls_states = []
         balls = self.particles.body_ids
         for i in range(20):
             if i < len(balls):
                 ball_id = balls[i]
                 pos, _ = p.getBasePositionAndOrientation(ball_id)
-                ball_rel_pos = pos - bowl_two_pos
+                ball_rel_pos = np.array(pos) - np.array(bowl_two_pos)
                 lin_vel, _ = p.getBaseVelocity(ball_id)
                 balls_states.extend(list(ball_rel_pos) + list(lin_vel))
             else:
@@ -318,8 +345,6 @@ class RobotChefSimulation(gym.Env):
         balls_poured = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
         elapsed_steps = self.current_step
         obs = np.array(
-            joint_positions +
-            joint_velocities +
             list(rel_pos) +
             list(rel_orn) +
             balls_states +
