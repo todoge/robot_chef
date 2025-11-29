@@ -92,7 +92,6 @@ class PourBowlIntoPanAndReturn:
         LOGGER.info("Setting up fixed camera view: '%s'", cfg.camera.active_view)
         self.camera = Camera( client_id=sim.client_id, view_xyz=view_cfg.xyz, view_rpy_deg=view_cfg.rpy_deg, fov_deg=view_cfg.fov_deg, near=cfg.camera.near, far=cfg.camera.far, resolution=view_cfg.resolution, noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob))
         active = sim.left_arm; self.active_arm_name = "left"
-        # Ensure using strong grip force from setup
         self.controller = VisionRefineController( client_id=sim.client_id, arm_id=active.body_id, ee_link=active.ee_link, arm_joints=active.joint_indices, dt=sim.dt, camera=self.camera, handeye_T_cam_in_eef=np.eye(4), gripper_open=lambda width=0.08: sim.gripper_open(width=width, arm=self.active_arm_name), gripper_close=lambda force=200.0: sim.gripper_close(force=force, arm=self.active_arm_name))
         sim.gripper_open(arm=self.active_arm_name)
         if cfg.particles > 0: sim.spawn_rice_particles(cfg.particles, seed=cfg.seed)
@@ -154,12 +153,10 @@ class PourBowlIntoPanAndReturn:
         LONG_TIMEOUT = 12.0 # Increased slightly again
         NORMAL_TIMEOUT = 9.0 # Increased slightly again
 
-        # --- GENTLER POUR PARAMS (v5 - Slower, More Steps) ---
-        POUR_STEPS = 500 # Even more steps
-        TOTAL_POUR_TIME_S = 10.0 # Pour over 10 seconds (very slow!)
+        POUR_STEPS = 150 # Even more steps
+        TOTAL_POUR_TIME_S = 8.0 # Pour over 10 seconds
         POUR_STEP_SIM_TIME = max(1, int( (TOTAL_POUR_TIME_S / POUR_STEPS) / sim.dt ))
-        POUR_STEP_GAIN = 0.015 # Extremely low gain for max smoothness
-        # --- END GENTLER POUR PARAMS ---
+        POUR_STEP_GAIN = 0.015 # Very low gain
 
 
         for idx, candidate in enumerate(candidates[:3]):
@@ -196,34 +193,39 @@ class PourBowlIntoPanAndReturn:
             pan_center_xy = np.array([pan_pose_sim.x, pan_pose_sim.y], dtype=float)
             pan_quat_xyzw = _pose_to_quaternion(pan_pose_sim)
             pan_R = np.array(p.getMatrixFromQuaternion(pan_quat_xyzw)).reshape(3, 3)
-            # --- INCREASED OFFSET DISTANCE SIGNIFICANTLY ---
-            # Assume pan radius is ~0.16
-            # Offset by half the radius (8cm) + a bit more = 12cm total
-            offset_dist = 0.12 # Offset 12cm along pan's X-axis (should be well into cooking area)
-            offset_local = np.array([offset_dist, 0.0, 0.0], dtype=float) # Offset along Pan's X
+            # --- CORRECTED OFFSET CALCULATION ---
+            # Pan local +X points along the handle. We want to move in the -X direction.
+            offset_dist = 0.20 # Offset 15cm from center, AWAY from handle
+            offset_local = np.array([-offset_dist, 0.0, 0.0], dtype=float) # NEGATIVE X offset
             offset_world = pan_R @ offset_local
             above_pan_target_xy = pan_center_xy + offset_world[:2]
             above_pan_target_pos = np.array([above_pan_target_xy[0], above_pan_target_xy[1], safe_lift_z], dtype=float)
-            level_quat = quat_grasp # Keep original grasp orientation
+            level_quat = quat_grasp
+            # --- END CORRECTED OFFSET ---
 
             # 3a. Smooth horizontal move
-            HORIZONTAL_MOVE_STEPS = 25 # More steps
+            HORIZONTAL_MOVE_STEPS = 25
             current_ls = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
             start_pos_horizontal = np.array(current_ls[0], dtype=float)
             LOGGER.info("Moving smoothly above pan cooking area (offset %.2f m) over %d steps...", offset_dist, HORIZONTAL_MOVE_STEPS)
             for i in range(HORIZONTAL_MOVE_STEPS + 1):
                 alpha = i / HORIZONTAL_MOVE_STEPS
                 inter_pos = (1.0 - alpha) * start_pos_horizontal + alpha * above_pan_target_pos
-                step_timeout = max(sim.dt * 12, LONG_TIMEOUT / HORIZONTAL_MOVE_STEPS) # Longer step timeout
+                step_timeout = max(sim.dt * 12, LONG_TIMEOUT / HORIZONTAL_MOVE_STEPS)
                 if not self.controller.move_waypoint(inter_pos, level_quat, timeout_s=step_timeout): LOGGER.warning("Intermediate horizontal move step %d failed.", i); break
             LOGGER.info("Ensuring final horizontal position above pan cooking area.")
             self.controller.move_waypoint(above_pan_target_pos, level_quat, timeout_s=NORMAL_TIMEOUT)
 
-            # 3b. Define Pour Start Pose (Use target XY at safe height, still level)
-            # --- REMOVED downward move before pour ---
-            pour_start_pos = above_pan_target_pos # Start pour rotation from the safe height
-            pour_start_quat = level_quat # Still level
-            LOGGER.info("Ready to pour at start pose Z=%.3f m", pour_start_pos[2])
+            # 3b. Define Pour Start Pose
+            pan_props = sim.objects["pan"]["properties"]
+            pan_rim_height = pan_pose_sim.z + pan_props.get("depth", 0.045)
+            pour_start_z = pan_rim_height + 0.25 # Start pour high
+            pour_start_pos = np.array([above_pan_target_xy[0], above_pan_target_xy[1], pour_start_z], dtype=float)
+            pour_start_quat = level_quat
+
+            LOGGER.info("Moving to pour start pose Z=%.3f m", pour_start_z)
+            if not self.controller.move_waypoint(pour_start_pos, pour_start_quat, timeout_s=LONG_TIMEOUT):
+                 LOGGER.warning("Move to pour start pose failed."); continue
 
 
             # === Step 4: Perform the pour slowly (using joint interpolation) ===
@@ -235,10 +237,7 @@ class PourBowlIntoPanAndReturn:
             pour_quat_target = _matrix_to_quaternion(pour_orn_matrix)
             # Pour target position keeps the same XY, drops Z slightly but stays high
             pour_pos_target = pour_start_pos.copy()
-            pan_props = sim.objects["pan"]["properties"]
-            pan_rim_height = pan_pose_sim.z + pan_props.get("depth", 0.045)
-            pour_pos_target[2] = max(pan_rim_height + 0.15, pour_start_pos[2] - 0.03) # Ensure pour ends >= 15cm above rim
-
+            pour_pos_target[2] = max(pan_rim_height + 0.15, pour_start_pos[2] - 0.03) # End pour >= 15cm above rim
 
             # Get IK for start and end
             q_start_pour = self.controller.get_ik_for_pose(pour_start_pos, pour_start_quat)
@@ -251,7 +250,6 @@ class PourBowlIntoPanAndReturn:
             for i in range(POUR_STEPS + 1):
                 alpha = i / POUR_STEPS
                 q_current = (1.0 - alpha) * q_start_pour + alpha * q_end_pour
-                # Command target with low gain, then step sim
                 self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
                 sim.step_simulation(steps=POUR_STEP_SIM_TIME)
             # --- END GENTLE POUR LOOP ---
@@ -268,11 +266,10 @@ class PourBowlIntoPanAndReturn:
                 self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
                 sim.step_simulation(steps=POUR_STEP_SIM_TIME)
 
-            # 5b. (Optional: Lift slightly higher before moving back, already at safe_lift_z)
-            LOGGER.info("Lifting bowl slightly before moving back.")
-            lift_return_pos = pour_start_pos.copy(); lift_return_pos[2] = safe_lift_z + 0.05 # Go slightly above safe height
-            self.controller.move_waypoint(lift_return_pos, level_quat, timeout_s = NORMAL_TIMEOUT)
-
+            # 5b. Lift back to safe height
+            LOGGER.info("Lifting bowl back to safe height above pan.")
+            above_pan_safe_pos = pour_start_pos.copy(); above_pan_safe_pos[2] = safe_lift_z
+            self.controller.move_waypoint(above_pan_safe_pos, level_quat, timeout_s=LONG_TIMEOUT)
 
             # 5c. Move horizontally back
             LOGGER.info("Moving smoothly back above bowl start position...")
@@ -282,7 +279,7 @@ class PourBowlIntoPanAndReturn:
             for i in range(HORIZONTAL_MOVE_STEPS + 1):
                 alpha = i / HORIZONTAL_MOVE_STEPS
                 inter_pos = (1.0 - alpha) * start_pos_return + alpha * back_target_pos
-                step_timeout = max(sim.dt * 12, LONG_TIMEOUT / HORIZONTAL_MOVE_STEPS) # Longer step timeout
+                step_timeout = max(sim.dt * 12, LONG_TIMEOUT / HORIZONTAL_MOVE_STEPS)
                 if not self.controller.move_waypoint(inter_pos, level_quat, timeout_s=step_timeout): LOGGER.warning("Intermediate return move step %d failed.", i)
             LOGGER.info("Ensuring final return position above bowl.")
             self.controller.move_waypoint(back_target_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT)
