@@ -245,6 +245,7 @@ class RobotChefSimulation(gym.Env):
 
         obs = self.get_obs()
         balls_poured_correctly = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 2)
+        balls_poured_out = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 1)
         balls_poured = self._count_balls_poured()
         balls_poured_wrongly = balls_poured - balls_poured_correctly
         reward += balls_poured_correctly * 6.0
@@ -252,8 +253,9 @@ class RobotChefSimulation(gym.Env):
         if balls_poured_correctly == 20:
             reward += 50.0
         
-        if balls_poured == 20:
+        if balls_poured == 20 and balls_poured_out == 0:
             terminated = True
+            
 
         truncated = self.current_step >= self.max_steps 
         if truncated:
@@ -272,8 +274,10 @@ class RobotChefSimulation(gym.Env):
             reward -= min((dist_between_bowls_xy - 0.2) * 5.0, 10.0)
         
         height_diff = abs(bowl_one_pos[2] - bowl_two_pos[2])
-        if height_diff > 0.25 or height_diff < 0.07 :
+        if height_diff > 0.25:
             reward -= min(height_diff * 30.0, 25.0)
+        elif height_diff < 0.07:
+            reward -= 32.0
         else:
             reward += 0.5
 

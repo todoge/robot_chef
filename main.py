@@ -42,7 +42,6 @@ def main():
     ee_pos, ee_orn = sim.get_eef_state("left")
     sim.setup_camera(ee_pos, ee_orn)
     rgb, depth_buffer, depth_norm, _= sim.camera.get_rgbd()
-    '''
     print("Depth min and max:", np.min(depth_norm), np.max(depth_norm))
     np.savetxt("depth.csv", depth_norm, delimiter=",")
     print("[DEPTH SHAPE]", depth_norm.shape)
@@ -54,7 +53,6 @@ def main():
     output = sim.gqcnn.predict(image_arr, pose_arr)
     print("[GQCNN Prediction]", output)
     print("[Prediction Shape]", output.shape)
-    '''
     pixel_row, pixel_col, grasp_angle, grasp_width, quality, quality_map, angle_map, width_map = sim.grasping_predictor.predict_grasp(depth_norm)
     sim.grasping_predictor.visualize_grasp_predictions(depth_norm, quality_map, angle_map, width_map, pixel_row, pixel_col, "grasp_visualisation_recali.png")
     coord = sim.pixel_to_world(pixel_row, pixel_col, depth_buffer)
