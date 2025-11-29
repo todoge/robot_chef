@@ -1,0 +1,50 @@
+# Scene Setup
+scene:
+  world_yaw_deg: 0
+
+# The target bowl position
+# MOVED CLOSER: x=0.28 (was 0.38) to assist reachability
+bowl_pose: [0.28, 0.0, 0.75, 0.0, 0.0, 0.0]
+
+# Irrelevant for this specific task, but required by schema
+# MOVED CLOSER: x=0.28
+pan_pose:  [0.28, 0.25, 0.75, 0.0, 0.0, 3.1416]
+pan_pour_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Standard camera settings
+camera:
+  active_view: default
+  near: 0.05
+  far: 5.0
+  views:
+    default:
+      xyz: [0.90, 0.0, 1.10]
+      rpy: [-45, 0, 180]
+      fov_deg: 60
+      resolution: [640, 480]
+  noise:
+    depth_std: 0.0
+    drop_prob: 0.0
+
+# Task Params
+perception:
+  enable: false # We assume we know where the bowl is for planning
+  bowl_roi_margin_m: 0.12
+  rim_sample_count: 24
+  grasp_clearance_m: 0.02
+  rim_thickness_m: 0.006
+
+tolerances:
+  place_back_xy: 0.03
+  place_back_yaw_deg: 8
+
+task:
+  pan_pour_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  tilt_angle_deg: 0
+  hold_sec: 0
+  noise:
+    depth_std: 0
+    drop_prob: 0
+
+particles: 80
+seed: 42
