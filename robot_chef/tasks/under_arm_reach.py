@@ -26,6 +26,7 @@ class UnderArmReachingTask:
     def __init__(self) -> None:
         self.sim = None
         self.cfg = None
+        self._grasped_object_id = None # Track what we are holding
 
     def setup(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> None:
         self.sim = sim
@@ -43,12 +44,9 @@ class UnderArmReachingTask:
         # 2. Setup Left Arm (The Obstacle)
         left_arm = sim.left_arm
         
-        # Move Left Arm to a "High Arch" configuration
-        # J0 (-1.5): Rotates base to face the left-center of the table
-        # J1 (0.3): Shoulder fairly upright (but not vertical) to start the arch high
-        # J3 (-1.8): Elbow bent significantly to reach down, but keeping the forearm high
-        # This creates a "tunnel" under the forearm/elbow.
-        blocking_joints = [-1.5, 0.3, 0.0, -1.8, 0.0, 2.0, 0.785]
+        # Move Left Arm to a "Blocking" configuration
+        # UPDATED: Rotated base to -1.2 to point arm towards the right side
+        blocking_joints = [-1.2, 0.3, 0.0, -1.4, 0.0, 2.0, 0.785]
         
         sim.set_joint_positions(blocking_joints, arm="left")
         sim.step_simulation(50) 
@@ -104,21 +102,54 @@ class UnderArmReachingTask:
         if not bowl or not pan: return False
 
         target_pose = bowl["pose"]
-        # Hover Height: 0.10m
-        pre_grasp_pos = [target_pose.x, target_pose.y, target_pose.z + 0.10] 
-        grasp_orn = p.getQuaternionFromEuler([3.14, 0, 0]) 
+        
+        # --- CALCULATE RIM GRASP ---
+        # Bowl properties from create_rice_bowl
+        bowl_radius = 0.07 
+        bowl_rim_height = 0.08 # wall_height
+        bowl_base_z = target_pose.z
+        
+        # Grasp Target: The TOP edge of the rim (closest to robot)
+        # y - radius puts us at the front edge
+        grasp_x = target_pose.x
+        grasp_y = target_pose.y - bowl_radius 
+        
+        # IMPORTANT FIX: Account for Hand Length (Palm to Finger center ~10.3cm)
+        # If we send the "Hand Link" to the rim height, the fingers smash into the floor.
+        # We must offset the Z target UP by the finger length so the TIPS land on the rim.
+        HAND_OFFSET_Z = 0.103 
+        
+        # Target Tip Position: 1.5cm below rim top
+        tip_z = bowl_base_z + bowl_rim_height - 0.015
+        
+        # Target Link Position: Tip Z + Hand Length
+        grasp_z = tip_z + HAND_OFFSET_Z
+        
+        grasp_target_pos = [grasp_x, grasp_y, grasp_z]
+        grasp_orn = p.getQuaternionFromEuler([3.14, 0, 0]) # Face down
+
+        LOGGER.info(f"Bowl Center: {target_pose.position}")
+        LOGGER.info(f"Calculated Rim Grasp Target (Link): {grasp_target_pos} (Tips at {tip_z:.3f})")
 
         q_start, _ = sim.get_joint_state(arm="right")
         
-        # --- 1. RRT: Home -> Pre-Grasp ---
-        q_pre_grasp = self._find_valid_goal(sim, pre_grasp_pos, grasp_orn)
+        # --- 1. RRT: Home -> Pre-Grasp (Hover) ---
+        # Search for valid goal
+        q_pre_grasp = None
+        for hover_gap in np.linspace(0.30, 0.10, 5): 
+            # Hover directly above the RIM grasp point, not center
+            test_pos = [grasp_x, grasp_y, grasp_z + hover_gap]
+            q_pre_grasp = self._find_valid_goal(sim, test_pos, grasp_orn, trials=100)
+            if q_pre_grasp is not None:
+                LOGGER.info(f"Found valid Pre-Grasp at hover gap +{hover_gap:.2f}m")
+                break
         
         if q_pre_grasp is None:
             LOGGER.error("CRITICAL: Could not find ANY valid goal configuration!")
             return False
 
         LOGGER.info("Planning Path to Pre-Grasp...")
-        path_in = self._rrt_connect(sim, q_start, q_pre_grasp, max_iter=5000)
+        path_in = self._rrt_connect(sim, q_start, q_pre_grasp, max_iter=5000) 
         
         if not path_in:
             LOGGER.error("RRT Failed to find path IN!")
@@ -134,15 +165,25 @@ class UnderArmReachingTask:
         time.sleep(0.5)
 
         # --- 2. Cartesian: Grasp Sequence ---
-        LOGGER.info("Descending to grasp...")
-        grasp_pos = [target_pose.x, target_pose.y, target_pose.z + 0.04]
-        self._linear_move(sim, grasp_pos, grasp_orn, steps=40)
+        LOGGER.info("Descending to grasp rim...")
+        self._linear_move(sim, grasp_target_pos, grasp_orn, steps=40)
         
-        sim.gripper_close(arm="right", force=100)
+        # --- MAGIC GRASP ---
+        # Freeze Bowl temporarily to prevent spin during grasp
+        bowl_id = int(bowl["body_id"])
+        p.changeDynamics(bowl_id, -1, mass=0) # Make static
+        
+        sim.gripper_close(arm="right", force=60.0)
         for _ in range(50): sim.step_simulation(1)
+        
+        # Restore mass and Lock bowl to gripper
+        p.changeDynamics(bowl_id, -1, mass=0.3)
+        self._create_grasp_constraint(sim, bowl_id)
+        self._grasped_object_id = bowl_id
 
-        LOGGER.info("Lifting bowl...")
-        lift_pos = [target_pose.x, target_pose.y, target_pose.z + 0.25]
+        LOGGER.info("Lifting bowl (retracting slightly)...")
+        # Lift UP and slightly AWAY (back towards robot) to clear the arch
+        lift_pos = [grasp_x, grasp_y - 0.1, grasp_z + 0.20]
         self._linear_move(sim, lift_pos, grasp_orn, steps=40)
 
         # --- 3. RRT: Lift -> Safe Neutral (Retract) ---
@@ -150,9 +191,12 @@ class UnderArmReachingTask:
         
         # Neutral Pose
         q_neutral = np.array([-0.8, -0.2, 0.0, -2.0, 0.0, 1.8, 0.785])
+        
+        # CRITICAL FIX: Re-read state fresh from physics engine
         q_lifted, _ = sim.get_joint_state(arm="right")
         
-        path_out = self._rrt_connect(sim, q_lifted, q_neutral, max_iter=5000)
+        # UPDATED: Use start_safety_override=True because we are holding the bowl
+        path_out = self._rrt_connect(sim, q_lifted, q_neutral, max_iter=5000, start_safety_override=True)
         
         if not path_out:
             LOGGER.error("RRT Failed to find path OUT to neutral!")
@@ -168,7 +212,10 @@ class UnderArmReachingTask:
         # --- 4. Cartesian: Neutral -> Pan ---
         LOGGER.info("Moving to Pan...")
         pan_pose = pan["pose"]
-        pour_pos = [pan_pose.x, pan_pose.y, pan_pose.z + 0.30]
+        # Pour Pos: Center of pan, Z high enough.
+        # Add HAND_OFFSET_Z here too so tips are at correct height!
+        pour_z_clearance = 0.30
+        pour_pos = [pan_pose.x, pan_pose.y, pan_pose.z + pour_z_clearance + HAND_OFFSET_Z]
         self._linear_move(sim, pour_pos, grasp_orn, steps=60)
         
         # --- 5. Pour (Tilt) ---
@@ -189,37 +236,97 @@ class UnderArmReachingTask:
     # ------------------------------------------------------------------ #
     # Helpers
 
-    def _find_valid_goal(self, sim, target_pos, target_orn, trials=20):
-        """Attempts to find a valid IK solution by perturbing the target slightly."""
+    def _create_grasp_constraint(self, sim, object_id):
+        """Creates a fixed constraint between the gripper palm and the object."""
+        # Find Panda Hand link index
+        arm = sim.right_arm
+        # 11 is usually panda_hand, but use ee_link just in case
+        parent_link = arm.ee_link 
         
-        # 1. Try Exact
-        q = self._solve_ik_safe(sim, target_pos, target_orn)
+        # Get current poses
+        parent_state = p.getLinkState(arm.body_id, parent_link, computeForwardKinematics=True, physicsClientId=sim.client_id)
+        parent_pos = np.array(parent_state[4])
+        parent_orn = np.array(parent_state[5])
+        
+        child_state = p.getBasePositionAndOrientation(object_id, physicsClientId=sim.client_id)
+        child_pos = np.array(child_state[0])
+        child_orn = np.array(child_state[1])
+        
+        # Calculate relative pose: T_parent_inv * T_child
+        # This gives child frame in parent frame
+        inv_parent_pos, inv_parent_orn = p.invertTransform(parent_pos, parent_orn)
+        rel_pos, rel_orn = p.multiplyTransforms(inv_parent_pos, inv_parent_orn, child_pos, child_orn)
+        
+        # Create constraint using the computed relative pose
+        cid = p.createConstraint(
+            parentBodyUniqueId=arm.body_id,
+            parentLinkIndex=parent_link,
+            childBodyUniqueId=object_id,
+            childLinkIndex=-1,
+            jointType=p.JOINT_FIXED,
+            jointAxis=[0, 0, 0],
+            parentFramePosition=rel_pos,
+            childFramePosition=[0, 0, 0],
+            parentFrameOrientation=rel_orn,
+            childFrameOrientation=[0, 0, 0, 1], # Identity
+            physicsClientId=sim.client_id
+        )
+        
+        p.changeConstraint(cid, maxForce=2000)
+        LOGGER.info(f"Grasp constraint created (ID {cid}) with relative lock")
+        return cid
+
+    def _find_valid_goal(self, sim, target_pos, target_orn, trials=100):
+        """Attempts to find a valid IK solution by trying random IK seeds (rest poses)."""
+        
+        # 1. Try Default
+        q = self._solve_ik_safe(sim, target_pos, target_orn, margin=0.002) 
         if q is not None: 
             return q
             
-        LOGGER.warning("Exact Pre-Grasp in collision. Searching nearby...")
+        LOGGER.warning(f"Exact Pre-Grasp at z={target_pos[2]:.2f} in collision. Attempting IK with random seeds...")
         
-        # 2. Perturb Position
+        arm = sim.right_arm
+        
+        # 2. Randomize Posture (Null Space Search)
         for i in range(trials):
-            noise = np.random.uniform(-0.02, 0.02, 3) # +/- 2cm jitter
+            random_rest = []
+            for j in range(len(arm.joint_lower)):
+                val = random.uniform(arm.joint_lower[j], arm.joint_upper[j])
+                random_rest.append(val)
+            
+            noise = np.random.uniform(-0.05, 0.05, 3)
             perturbed_pos = np.array(target_pos) + noise
-            q = self._solve_ik_safe(sim, perturbed_pos, target_orn)
+            
+            q = self._solve_ik_safe(sim, perturbed_pos, target_orn, rest_pose=random_rest, margin=0.002)
             if q is not None:
-                LOGGER.info(f"Found valid goal after {i+1} perturbations.")
+                LOGGER.info(f"Found valid goal after {i+1} random seeds.")
                 return q
                 
         return None
 
-    def _solve_ik_safe(self, sim, pos, orn):
+    def _solve_ik_safe(self, sim, pos, orn, rest_pose=None, debug=False, margin=0.005):
         """Attempts to find a collision-free IK solution."""
-        full_ik = p.calculateInverseKinematics(
-            sim.right_arm.body_id, sim.right_arm.ee_link, pos, orn,
-            maxNumIterations=100, residualThreshold=1e-4, physicsClientId=sim.client_id
-        )
+        arm = sim.right_arm
+        args = {
+            "bodyUniqueId": arm.body_id,
+            "endEffectorLinkIndex": arm.ee_link,
+            "targetPosition": pos,
+            "targetOrientation": orn,
+            "maxNumIterations": 100,
+            "residualThreshold": 1e-4,
+            "physicsClientId": sim.client_id
+        }
+        if rest_pose is not None:
+            args["lowerLimits"] = list(arm.joint_lower)
+            args["upperLimits"] = list(arm.joint_upper)
+            args["jointRanges"] = list(arm.joint_ranges)
+            args["restPoses"] = list(rest_pose)
+        
+        full_ik = p.calculateInverseKinematics(**args)
         q = np.array(full_ik[:7])
         
-        # Pass `debug=True` only if you want to spam console, keeping it clean for now
-        if not self._check_collision(sim, q):
+        if not self._check_collision(sim, q, debug=debug, margin=margin):
             return q
         return None
 
@@ -247,7 +354,7 @@ class UnderArmReachingTask:
     # ------------------------------------------------------------------ #
     # RRT Implementation
 
-    def _check_collision(self, sim: RobotChefSimulation, q: np.ndarray, debug: bool = False) -> bool:
+    def _check_collision(self, sim: RobotChefSimulation, q: np.ndarray, debug: bool = False, margin: float = 0.005) -> bool:
         for i, idx in enumerate(sim.right_arm.joint_indices):
             p.resetJointState(sim.right_arm.body_id, idx, q[i], physicsClientId=sim.client_id)
         
@@ -262,12 +369,15 @@ class UnderArmReachingTask:
             if body_b == sim.right_arm.body_id: continue
             if right_mount_id is not None and body_b == right_mount_id: continue
             
+            # IGNORE GRASPED OBJECT
+            if self._grasped_object_id is not None and body_b == self._grasped_object_id:
+                continue
+
             if debug:
                 body_name = p.getBodyInfo(body_b, physicsClientId=sim.client_id)[1].decode()
                 LOGGER.debug(f"Collision detected with Body ID {body_b} ({body_name})")
             return True
 
-        margin = 0.005 # Reduced to 5mm for final grasp approach
         obstacles = [sim.left_arm.body_id, self.specula_id]
         
         for obs_id in obstacles:
@@ -300,8 +410,19 @@ class UnderArmReachingTask:
     def _restore_state(self, sim: RobotChefSimulation, q: np.ndarray):
         for i, idx in enumerate(sim.right_arm.joint_indices):
             p.resetJointState(sim.right_arm.body_id, idx, q[i], physicsClientId=sim.client_id)
+            # CRITICAL: Also reset velocities to zero to stop "flinging"
+            p.resetJointState(sim.right_arm.body_id, idx, q[i], targetVelocity=0.0, physicsClientId=sim.client_id)
 
-    def _rrt_connect(self, sim: RobotChefSimulation, q_start: np.ndarray, q_goal: np.ndarray, max_iter=5000) -> list:
+    def _rrt_connect(self, sim: RobotChefSimulation, q_start: np.ndarray, q_goal: np.ndarray, max_iter=5000, start_safety_override=False) -> list:
+        # Check endpoints first
+        # Use override to skip start check if requested (e.g. holding object)
+        if not start_safety_override and self._check_collision(sim, q_start):
+             LOGGER.error("RRT Start Configuration is in collision.")
+             return []
+        if self._check_collision(sim, q_goal, debug=True): 
+             LOGGER.error("RRT Goal Configuration is in collision.")
+             return []
+
         J_MIN = np.array([-2.8, -1.7, -2.8, -3.0, -2.8, -0.01, -2.8])
         J_MAX = np.array([ 2.8,  1.7,  2.8, -0.06, 2.8,  3.7,  2.8])
         

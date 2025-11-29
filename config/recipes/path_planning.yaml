@@ -3,12 +3,13 @@ scene:
   world_yaw_deg: 0
 
 # The target bowl position
-# MOVED FURTHER LEFT: y=0.45 (was 0.35) to be closer to the left mount
-bowl_pose: [0.45, 0.45, 0.75, 0.0, 0.0, 0.0]
+# MOVED CLOSER TO EDGE: x=0.35 (was 0.45)
+# SLIGHTLY AWAY FROM ARM: y=0.40 (was 0.45)
+bowl_pose: [0.0, 0.25, 0.75, 0.0, 0.0, 0.0]
 
 # The pan position
 # Right side
-pan_pose:  [0.45, -0.3, 0.75, 0.0, 0.0, 3.1416]
+pan_pose:  [0.25, -0.3, 0.75, 0.0, 0.0, 3.1416]
 pan_pour_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # Standard camera settings
