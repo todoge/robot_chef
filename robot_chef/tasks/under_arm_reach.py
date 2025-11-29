@@ -32,8 +32,6 @@ class UnderArmReachingTask:
         self.cfg = cfg
         
         # --- 0. SAFETY FIRST: Move Right Arm to Safe Home ---
-        # Moving explicitly to a safe "Retracted Right" pose to avoid startup collisions
-        # Joints: [pan, lift, pan, lift, twist, bend, twist]
         safe_right_joints = [-1.5, -1.0, 0.0, -2.2, 0.0, 1.8, 0.785]
         sim.set_joint_positions(safe_right_joints, arm="right")
         sim.step_simulation(20)
@@ -45,10 +43,12 @@ class UnderArmReachingTask:
         # 2. Setup Left Arm (The Obstacle)
         left_arm = sim.left_arm
         
-        # Move Left Arm to a "Blocking" configuration
-        # J1 (1.3): Increased shoulder lean to flatten the arm (lower elbow).
-        # J3 (-1.4): Bent elbow to bring hand closer to table level.
-        blocking_joints = [-2.2, 1.3, 0.0, -1.4, 0.0, 1.6, 0.785]
+        # Move Left Arm to a "High Arch" configuration
+        # J0 (-1.5): Rotates base to face the left-center of the table
+        # J1 (0.3): Shoulder fairly upright (but not vertical) to start the arch high
+        # J3 (-1.8): Elbow bent significantly to reach down, but keeping the forearm high
+        # This creates a "tunnel" under the forearm/elbow.
+        blocking_joints = [-1.5, 0.3, 0.0, -1.8, 0.0, 2.0, 0.785]
         
         sim.set_joint_positions(blocking_joints, arm="left")
         sim.step_simulation(50) 
@@ -78,13 +78,11 @@ class UnderArmReachingTask:
         sim.gripper_close(arm="left")
         sim.step_simulation(50)
 
-        # Wait for specula to render
         LOGGER.info("Waiting for specula to render...")
         for _ in range(20):
             sim.step_simulation(1)
             time.sleep(0.05)
             
-        # Ensure particles are there if config missed them (though we updated yaml)
         if not sim.particles:
              LOGGER.info("Spawning particles manually...")
              sim.spawn_rice_particles(80, seed=cfg.seed)
@@ -97,7 +95,7 @@ class UnderArmReachingTask:
 
     def execute(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
         """
-        Execute RRT Reach -> Grasp -> Lift -> Move to Pan -> Pour.
+        Execute RRT Reach -> Grasp -> Safe Neutral -> Move to Pan -> Pour.
         """
         LOGGER.info("Execution: Calculating RRT Path...")
         
@@ -105,76 +103,84 @@ class UnderArmReachingTask:
         pan = sim.objects.get("pan")
         if not bowl or not pan: return False
 
-        # --- 1. RRT to Pre-Grasp (Hover) ---
         target_pose = bowl["pose"]
-        # Hover slightly above bowl (0.15m up)
-        pre_grasp_pos = [target_pose.x, target_pose.y, target_pose.z + 0.15] 
-        grasp_orn = p.getQuaternionFromEuler([3.14, 0, 0]) # Face down
+        # Hover Height: 0.10m
+        pre_grasp_pos = [target_pose.x, target_pose.y, target_pose.z + 0.10] 
+        grasp_orn = p.getQuaternionFromEuler([3.14, 0, 0]) 
 
         q_start, _ = sim.get_joint_state(arm="right")
         
-        # Calculate Goal Config (Pre-Grasp)
-        full_ik = p.calculateInverseKinematics(
-            sim.right_arm.body_id, sim.right_arm.ee_link, pre_grasp_pos, grasp_orn,
-            maxNumIterations=100, residualThreshold=1e-4, physicsClientId=sim.client_id
-        )
-        q_pre_grasp = np.array(full_ik[:7])
-
-        # Run RRT
-        LOGGER.info("Planning Path to Pre-Grasp...")
-        path = self._rrt_connect(sim, q_start, q_pre_grasp)
+        # --- 1. RRT: Home -> Pre-Grasp ---
+        q_pre_grasp = self._find_valid_goal(sim, pre_grasp_pos, grasp_orn)
         
-        if not path:
-            LOGGER.error("RRT Failed to find a path!")
+        if q_pre_grasp is None:
+            LOGGER.error("CRITICAL: Could not find ANY valid goal configuration!")
             return False
 
-        # --- Advanced Technique: Path Smoothing ---
-        LOGGER.info(f"Raw Path found ({len(path)} steps). Smoothing...")
-        path = self._smooth_path(sim, path)
+        LOGGER.info("Planning Path to Pre-Grasp...")
+        path_in = self._rrt_connect(sim, q_start, q_pre_grasp, max_iter=5000)
+        
+        if not path_in:
+            LOGGER.error("RRT Failed to find path IN!")
+            return False
 
-        # Execute RRT Path
-        LOGGER.info(f"Smoothed Path ({len(path)} steps). Moving to hover...")
-        self._execute_path(sim, path)
+        LOGGER.info("Smoothing Path IN...")
+        path_in = self._smooth_path(sim, path_in)
+
+        # Execute Path IN
+        LOGGER.info(f"Moving to hover ({len(path_in)} steps)...")
+        self._execute_path(sim, path_in)
         sim.gripper_open(arm="right")
         time.sleep(0.5)
 
-        # --- 2. Cartesian: Down to Grasp ---
+        # --- 2. Cartesian: Grasp Sequence ---
         LOGGER.info("Descending to grasp...")
-        # Target Z: Bowl rim is ~0.05m high. We want gripper fingers around it.
         grasp_pos = [target_pose.x, target_pose.y, target_pose.z + 0.04]
         self._linear_move(sim, grasp_pos, grasp_orn, steps=40)
         
-        # --- 3. Close Gripper ---
         sim.gripper_close(arm="right", force=100)
         for _ in range(50): sim.step_simulation(1)
 
-        # --- 4. Cartesian: Lift Bowl ---
         LOGGER.info("Lifting bowl...")
-        # Lift high enough to clear pan walls but assume obstacle is avoided by x/y separation
         lift_pos = [target_pose.x, target_pose.y, target_pose.z + 0.25]
         self._linear_move(sim, lift_pos, grasp_orn, steps=40)
 
-        # --- 5. Cartesian: Move Above Pan ---
+        # --- 3. RRT: Lift -> Safe Neutral (Retract) ---
+        LOGGER.info("Planning Path to Safe Neutral...")
+        
+        # Neutral Pose
+        q_neutral = np.array([-0.8, -0.2, 0.0, -2.0, 0.0, 1.8, 0.785])
+        q_lifted, _ = sim.get_joint_state(arm="right")
+        
+        path_out = self._rrt_connect(sim, q_lifted, q_neutral, max_iter=5000)
+        
+        if not path_out:
+            LOGGER.error("RRT Failed to find path OUT to neutral!")
+            return False
+            
+        LOGGER.info("Smoothing Path OUT...")
+        path_out = self._smooth_path(sim, path_out)
+        
+        LOGGER.info(f"Retracting to Neutral ({len(path_out)} steps)...")
+        self._execute_path(sim, path_out)
+        time.sleep(0.5)
+
+        # --- 4. Cartesian: Neutral -> Pan ---
         LOGGER.info("Moving to Pan...")
         pan_pose = pan["pose"]
         pour_pos = [pan_pose.x, pan_pose.y, pan_pose.z + 0.30]
         self._linear_move(sim, pour_pos, grasp_orn, steps=60)
         
-        # --- 6. Pour (Tilt) ---
+        # --- 5. Pour (Tilt) ---
         LOGGER.info("Pouring...")
-        # Tilt 120 degrees around Y axis relative to gripper
-        # Simple approximation: rotate target orientation
         tilt_orn = p.getQuaternionFromEuler([3.14, -2.1, 0.0]) 
         self._linear_move(sim, pour_pos, tilt_orn, steps=80)
         
-        # Shake / Wait for particles
         for _ in range(120): sim.step_simulation(1)
         
-        # Untilt
         LOGGER.info("Untilting...")
         self._linear_move(sim, pour_pos, grasp_orn, steps=50)
 
-        # Metrics
         metrics = sim.count_particles_in_pan()
         LOGGER.info(f"Task Complete. Metrics: {metrics}")
         
@@ -183,22 +189,51 @@ class UnderArmReachingTask:
     # ------------------------------------------------------------------ #
     # Helpers
 
+    def _find_valid_goal(self, sim, target_pos, target_orn, trials=20):
+        """Attempts to find a valid IK solution by perturbing the target slightly."""
+        
+        # 1. Try Exact
+        q = self._solve_ik_safe(sim, target_pos, target_orn)
+        if q is not None: 
+            return q
+            
+        LOGGER.warning("Exact Pre-Grasp in collision. Searching nearby...")
+        
+        # 2. Perturb Position
+        for i in range(trials):
+            noise = np.random.uniform(-0.02, 0.02, 3) # +/- 2cm jitter
+            perturbed_pos = np.array(target_pos) + noise
+            q = self._solve_ik_safe(sim, perturbed_pos, target_orn)
+            if q is not None:
+                LOGGER.info(f"Found valid goal after {i+1} perturbations.")
+                return q
+                
+        return None
+
+    def _solve_ik_safe(self, sim, pos, orn):
+        """Attempts to find a collision-free IK solution."""
+        full_ik = p.calculateInverseKinematics(
+            sim.right_arm.body_id, sim.right_arm.ee_link, pos, orn,
+            maxNumIterations=100, residualThreshold=1e-4, physicsClientId=sim.client_id
+        )
+        q = np.array(full_ik[:7])
+        
+        # Pass `debug=True` only if you want to spam console, keeping it clean for now
+        if not self._check_collision(sim, q):
+            return q
+        return None
+
     def _execute_path(self, sim, path):
         for q in path:
             sim.set_joint_positions(q, arm="right")
             for _ in range(5): sim.step_simulation(1)
-            # time.sleep(0.02) # Optional: speed up
 
     def _linear_move(self, sim, target_pos, target_orn, steps=60):
-        """Linearly interpolate EEF pose (Cartesian control)."""
         current_pos = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, physicsClientId=sim.client_id)[4]
         current_orn = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, physicsClientId=sim.client_id)[5]
         
-        # Very simple lerp
         for t in np.linspace(0, 1, steps):
             pos = np.array(current_pos) * (1 - t) + np.array(target_pos) * t
-            # Slerp for orientation is better, but simple lerp/nlerp or just fixed target is often okay for small moves.
-            # Here we just switch to target orn for simplicity or keep fixed if same
             orn = target_orn 
             
             full_ik = p.calculateInverseKinematics(
@@ -212,36 +247,27 @@ class UnderArmReachingTask:
     # ------------------------------------------------------------------ #
     # RRT Implementation
 
-    def _check_collision(self, sim: RobotChefSimulation, q: np.ndarray) -> bool:
-        """
-        Checks collision for the Right Arm at configuration q with a SAFETY MARGIN.
-        CRITICAL FIX: Uses p.resetJointState to INSTANTLY teleport collision shapes.
-        sim.set_joint_positions does not move shapes until stepSimulation is called.
-        """
-        # Teleport right arm to test configuration
+    def _check_collision(self, sim: RobotChefSimulation, q: np.ndarray, debug: bool = False) -> bool:
         for i, idx in enumerate(sim.right_arm.joint_indices):
             p.resetJointState(sim.right_arm.body_id, idx, q[i], physicsClientId=sim.client_id)
         
         p.performCollisionDetection(physicsClientId=sim.client_id)
         
-        # 1. Standard Contact Check (Actual Touching)
         contacts = p.getContactPoints(bodyA=sim.right_arm.body_id, physicsClientId=sim.client_id)
         
-        # Filter contacts: We must ignore the mount (pedestal) the arm is standing on.
         right_mount_id = sim.objects.get("right_mount", {}).get("body_id")
         
         for c in contacts:
             body_b = c[2]
-            # Ignore self (handled by URDF usually) and mount
             if body_b == sim.right_arm.body_id: continue
             if right_mount_id is not None and body_b == right_mount_id: continue
             
-            # If we hit anything else (Left Arm, Table, Bowl, Specula), it's a collision
+            if debug:
+                body_name = p.getBodyInfo(body_b, physicsClientId=sim.client_id)[1].decode()
+                LOGGER.debug(f"Collision detected with Body ID {body_b} ({body_name})")
             return True
 
-        # 2. Safety Margin Check (Proximity)
-        # We enforce a 2.5cm buffer zone around the obstacles.
-        margin = 0.025
+        margin = 0.005 # Reduced to 5mm for final grasp approach
         obstacles = [sim.left_arm.body_id, self.specula_id]
         
         for obs_id in obstacles:
@@ -252,19 +278,15 @@ class UnderArmReachingTask:
                 physicsClientId=sim.client_id
             )
             if len(closest) > 0:
+                if debug: LOGGER.debug(f"Safety Margin violation with obstacle {obs_id}")
                 return True
                 
         return False
 
     def _check_segment_collision(self, sim: RobotChefSimulation, q1: np.ndarray, q2: np.ndarray, step_rad: float = 0.02) -> bool:
-        """
-        Checks collision densely along the linear path segment between q1 and q2.
-        Interpolates every 'step_rad' radians to prevent tunneling through thin obstacles.
-        """
         dist = np.linalg.norm(q2 - q1)
         steps = int(math.ceil(dist / step_rad))
         
-        # Always check at least the endpoint if close
         if steps <= 1:
             return self._check_collision(sim, q2)
             
@@ -276,13 +298,10 @@ class UnderArmReachingTask:
         return False
     
     def _restore_state(self, sim: RobotChefSimulation, q: np.ndarray):
-        """Restores the robot physics state after planning teleportation."""
         for i, idx in enumerate(sim.right_arm.joint_indices):
             p.resetJointState(sim.right_arm.body_id, idx, q[i], physicsClientId=sim.client_id)
 
-    def _rrt_connect(self, sim: RobotChefSimulation, q_start: np.ndarray, q_goal: np.ndarray, max_iter=2000) -> list:
-        """Bi-Directional RRT with Strict Segment Checking."""
-        
+    def _rrt_connect(self, sim: RobotChefSimulation, q_start: np.ndarray, q_goal: np.ndarray, max_iter=5000) -> list:
         J_MIN = np.array([-2.8, -1.7, -2.8, -3.0, -2.8, -0.01, -2.8])
         J_MAX = np.array([ 2.8,  1.7,  2.8, -0.06, 2.8,  3.7,  2.8])
         
@@ -299,7 +318,7 @@ class UnderArmReachingTask:
         tree_a = [start_node]
         tree_b = [goal_node]
         
-        step_size = 0.05 
+        step_size = 0.08 
 
         def get_nearest(tree, q_rand):
             dists = [np.linalg.norm(node.q - q_rand) for node in tree]
@@ -316,7 +335,6 @@ class UnderArmReachingTask:
             else:
                 q_new = nearest.q + (direction / dist) * step_size
             
-            # UPDATED: Use Segment Check instead of Point Check
             if not self._check_segment_collision(sim, nearest.q, q_new):
                 new_node = Node(q_new, nearest)
                 tree.append(new_node)
@@ -355,14 +373,10 @@ class UnderArmReachingTask:
             
             tree_a, tree_b = tree_b, tree_a
 
-        # Restore simulation state cleanly
         self._restore_state(sim, q_real_start)
         return path
 
     def _smooth_path(self, sim, path, iterations=50):
-        """
-        Shortcut Smoothing with Segment Checking.
-        """
         if len(path) < 3: return path
         
         q_real_start, _ = sim.get_joint_state(arm="right")
@@ -370,19 +384,15 @@ class UnderArmReachingTask:
         for _ in range(iterations):
             if len(path) < 3: break
             
-            # Pick two random indices
             i, j = sorted(random.sample(range(len(path)), 2))
-            if j - i <= 1: continue # Adjacent points
+            if j - i <= 1: continue 
             
             q1 = path[i]
             q2 = path[j]
             
-            # UPDATED: Use helper to check the entire shortcut segment
             if not self._check_segment_collision(sim, q1, q2):
-                # Shortcut successful! Remove intermediate points
                 path = path[:i+1] + path[j:]
                 
-        # Restore simulation state cleanly
         self._restore_state(sim, q_real_start)
         return path
 
