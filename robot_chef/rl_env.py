@@ -209,7 +209,7 @@ class RobotChefSimulation(gym.Env):
             p.setJointMotorControl2(arm.body_id, idx, p.POSITION_CONTROL, targetPosition=target_pos, maxVelocity=1.0, force=80)
         '''
         max_pos_delta = 0.3
-        max_orn_delta = 1
+        max_orn_delta = 2.5
         dx = action[0] * max_pos_delta
         dy = action[1] * max_pos_delta
         dz = action[2] * max_pos_delta
