@@ -248,7 +248,7 @@ class RobotChefSimulation(gym.Env):
         balls_poured_out = self._count_balls_in_target_bowl(self.objects["pouring_bowl"]["properties"], 1)
         balls_poured = self._count_balls_poured()
         balls_poured_wrongly = balls_poured - balls_poured_correctly
-        reward += balls_poured_correctly * 6.0
+        reward += balls_poured_correctly * 12.0
         reward -= balls_poured_wrongly * 3.0
         if balls_poured_correctly == 20:
             reward += 50.0
