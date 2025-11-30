@@ -26,6 +26,10 @@ def main():
     cfg = config.load_pour_task_config(Path(args.config))
     sim = RobotChefSimulation(gui=not args.headless, recipe=cfg)
     sim._setup_environment()
+    sim.spawn_rice_particles_extra(10)
+    while True:
+      p.stepSimulation(sim.client_id)
+      x = 1
     down_orn = p.getQuaternionFromEuler([math.pi, 0, 0])
     sim.move_arm_to_pose("left", [0.5,0.3,2], down_orn, max_secs=5.0)
     ee_pos, ee_orn = sim.get_eef_state("left")

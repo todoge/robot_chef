@@ -115,6 +115,7 @@ class TaskRuntimeConfig:
 @dataclass(frozen=True)
 class PourTaskConfig:
     bowl_pose: Pose6D
+    bowl_pose_1: Pose6D
     pan_pose: Pose6D
     pan_pour_pose: Pose6D
     tilt_angle_deg: float
@@ -214,6 +215,7 @@ def load_pour_task_config(path: Union[str, Path]) -> PourTaskConfig:
         data: MutableMapping[str, object] = yaml.safe_load(fh) or {}
 
     bowl_pose = Pose6D.from_iterable(data.get("bowl_pose", (0, 0, 0, 0, 0, 0)))
+    bowl_pose_1 = Pose6D.from_iterable(data.get("bowl_pose_1", (0, 0, 0, 0, 0, 0)))
     pan_pose = Pose6D.from_iterable(data.get("pan_pose", (0, 0, 0, 0, 0, 0)))
     pan_pour_pose = Pose6D.from_iterable(
         data.get("pan_pour_pose", data.get("pan_pose", (0, 0, 0, 0, 0, 0)))
@@ -232,6 +234,7 @@ def load_pour_task_config(path: Union[str, Path]) -> PourTaskConfig:
 
     return PourTaskConfig(
         bowl_pose=bowl_pose,
+        bowl_pose_1=bowl_pose_1,
         pan_pose=pan_pose,
         pan_pour_pose=pan_pour_pose,
         tilt_angle_deg=tilt_angle_deg,

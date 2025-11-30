@@ -151,8 +151,10 @@ class RobotChefSimulation:
 
         # Create bowl and pan at configured poses (apply world yaw).
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
+        bowl_pose_1 = self._apply_world_yaw(self.recipe.bowl_pose_1)
         print(f"Creating bowl at pose: {bowl_pose}")
         bowl_id, props = bowl_factory.create_rounded_bowl(self.client_id, pose=bowl_pose)
+        bowl_id_1, props_1 = bowl_factory.create_rounded_bowl_vhacd(self.client_id, pose=bowl_pose_1)
         #bowl_id = spatula.create_spatula(self.client_id, pose=bowl_pose)
         print(f"Bowl created with body id: {bowl_id}")
         aabb_min, aabb_max = p.getAABB(bowl_id, physicsClientId=self.client_id)
@@ -168,7 +170,11 @@ class RobotChefSimulation:
         if "bowl" in self.objects:
             p.removeBody(self.objects["bowl"]["body_id"], physicsClientId=self.client_id)
             del self.objects["bowl"]
+        if "bowl_extra" in self.objects:
+            p.removeBody(self.objects["bowl_extra"]["body_id"], physicsClientId=self.client_id)
+            del self.objects["bowl_extra"]
         self.objects["bowl"] = {"body_id": bowl_id, "properties": props, "pose": bowl_pose}
+        self.objects["bowl_extra"] = {"body_id": bowl_id_1, "properties": props, "pose": bowl_pose_1}
         #self.objects["bowl"] = {"body_id": bowl_id, "pose": bowl_pose}
         ''' 
         pan_pose = self._apply_world_yaw(self.recipe.pan_pose)
@@ -236,7 +242,7 @@ class RobotChefSimulation:
 
         # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
-        #self.spawn_rice_particles(30)
+        self.spawn_rice_particles(10)
 
         # Expose pan base height after snapping (useful for later metrics).
         #pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
@@ -511,6 +517,33 @@ class RobotChefSimulation:
                 physicsClientId=self.client_id,
             )
         self.wait_steps(120, arm)
+
+    def spawn_rice_particles_extra(
+        self,
+        count: int,
+        radius: float = 0.005,
+        seed: int = 7,
+    ) -> Optional[ParticleSet]:
+        bowl_entry = self.objects.get("bowl_extra")
+        if not bowl_entry:
+            LOGGER.warning("Cannot spawn particles before bowl is created")
+            return None
+        bowl_id = bowl_entry["body_id"]
+        position, _ = p.getBasePositionAndOrientation(bowl_id, physicsClientId=self.client_id)
+        bowl_props = bowl_entry["properties"]
+        particle_set = spawn_spheres(
+            client_id=self.client_id,
+            count=count,
+            radius=radius,
+            center=position,
+            bowl_radius=float(bowl_props["inner_radius"]),
+            bowl_height=float(bowl_props["inner_height"]),
+            spawn_height=float(bowl_props["spawn_height"]),
+            seed=seed,
+        )
+        self.particles = particle_set
+        LOGGER.info("Spawned %d rice particles (radius=%.4f)", particle_set.count, radius)
+        return particle_set
 
     def spawn_rice_particles(
         self,
