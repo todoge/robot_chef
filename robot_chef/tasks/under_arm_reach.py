@@ -47,7 +47,7 @@ class UnderArmReachingTask:
         
         # Move Left Arm to a "Blocking" configuration
         # Rotated base to -1.8 to point arm towards the front-right sector (obstacle mode)
-        blocking_joints = [-1.9, 0.3, 0.0, -1.4, 0.0, 2.0, 0.785]
+        blocking_joints = [-1.85, 0.51, 0.0, -1.4, 0.0, 2.0, 0.785]
         
         sim.set_joint_positions(blocking_joints, arm="left")
         sim.step_simulation(50) 
@@ -84,7 +84,7 @@ class UnderArmReachingTask:
             
         if not sim.particles:
              LOGGER.info("Spawning particles manually...")
-             sim.spawn_rice_particles(80, seed=cfg.seed)
+             sim.spawn_rice_particles(20, radius=0.01, seed=cfg.seed)
         
         LOGGER.info("Scenario Setup: Left Arm is holding specula in blocking pose.")
 
@@ -136,12 +136,30 @@ class UnderArmReachingTask:
         LOGGER.info("Pre-planning: Computing all paths before execution...")
 
         # 1. Path to Bowl
-        q_bowl_hover = self._find_valid_goal(sim, bowl_hover_pos, grasp_orn, trials=100)
+        # Force an intermediate waypoint to keep arm over the table initially
+        # This prevents wide swings that go out of bounds
+        q_intermediate_guess = [0.0, -0.5, 0.0, -2.0, 0.0, 2.0, 0.785] # A generic "high center" pose
+        
+        # Increased trials for finding valid IK (was 100)
+        q_bowl_hover = self._find_valid_goal(sim, bowl_hover_pos, grasp_orn, trials=300)
         if q_bowl_hover is None:
             LOGGER.error("CRITICAL: Could not find valid configuration at Bowl!")
             return False
 
-        path_to_bowl = self._rrt_connect(sim, q_start, q_bowl_hover, max_iter=5000) 
+        # Plan in two segments: Start -> High Center -> Bowl Hover
+        # Increased RRT iterations (was 2000 -> 3000)
+        path_to_center = self._rrt_connect(sim, q_start, np.array(q_intermediate_guess), max_iter=3000)
+        if not path_to_center:
+             # Fallback to direct plan if intermediate fails (unlikely)
+             path_to_bowl = self._rrt_connect(sim, q_start, q_bowl_hover, max_iter=7000)
+        else:
+             # Increased RRT iterations (was 3000 -> 5000)
+             path_from_center = self._rrt_connect(sim, np.array(q_intermediate_guess), q_bowl_hover, max_iter=5000)
+             if not path_from_center:
+                 LOGGER.error("RRT Failed: Center -> Bowl")
+                 return False
+             path_to_bowl = path_to_center + path_from_center[1:]
+
         if not path_to_bowl:
             LOGGER.error("RRT Failed to find path to Bowl!")
             return False
@@ -152,20 +170,22 @@ class UnderArmReachingTask:
         # We estimate q_lift by solving IK for the lift_pos, using q_bowl_hover as a seed.
         q_lift = self._solve_ik_safe(sim, lift_pos, grasp_orn, rest_pose=q_bowl_hover, margin=0.002)
         if q_lift is None:
-             # Fallback
-             q_lift = self._find_valid_goal(sim, lift_pos, grasp_orn, trials=50)
+             # Fallback, increased trials (was 50 -> 150)
+             q_lift = self._find_valid_goal(sim, lift_pos, grasp_orn, trials=150)
              
         if q_lift is None:
             LOGGER.error("CRITICAL: Could not find valid configuration at Lift Pose!")
             return False
             
-        q_pan_hover = self._find_valid_goal(sim, pan_hover_pos, grasp_orn, trials=50)
+        # Increased trials (was 50 -> 150)
+        q_pan_hover = self._find_valid_goal(sim, pan_hover_pos, grasp_orn, trials=150)
         if q_pan_hover is None:
              LOGGER.error("CRITICAL: Could not find valid configuration at Pan!")
              return False
         
         # Plan path assuming arm-only collisions (bowl collisions handled by safety margins/luck in this simplified scope)
-        path_to_pan = self._rrt_connect(sim, q_lift, q_pan_hover, max_iter=5000)
+        # Increased RRT iterations (was 5000 -> 8000)
+        path_to_pan = self._rrt_connect(sim, q_lift, q_pan_hover, max_iter=8000)
         if not path_to_pan:
             LOGGER.error("RRT Failed to find path to Pan!")
             return False
