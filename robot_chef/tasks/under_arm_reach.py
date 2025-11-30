@@ -47,7 +47,7 @@ class UnderArmReachingTask:
         
         # Move Left Arm to a "Blocking" configuration
         # Rotated base to -1.8 to point arm towards the front-right sector (obstacle mode)
-        blocking_joints = [-1.8, 0.3, 0.0, -1.4, 0.0, 2.0, 0.785]
+        blocking_joints = [-1.9, 0.3, 0.0, -1.4, 0.0, 2.0, 0.785]
         
         sim.set_joint_positions(blocking_joints, arm="left")
         sim.step_simulation(50) 
@@ -109,13 +109,13 @@ class UnderArmReachingTask:
         # --- Define Targets ---
         # 1. Bowl Edge Hover Position
         grasp_x = target_pose.x
-        grasp_y = target_pose.y - bowl_radius 
+        # Adjusted Y to center grasp on the wall thickness (radius 0.07 - half_wall 0.004)
+        grasp_y = target_pose.y - (bowl_radius - 0.004)
         
         # Target Z: Wrist/Palm position.
         # Fingers are ~10cm long. Bowl is ~8cm high.
-        # To grasp rim (top ~8cm), wrist should be at ~18cm.
-        # To grasp deep (middle ~4cm), wrist should be at ~14cm.
-        grasp_z = target_pose.z + 0.14 
+        # Adjusted Z for deeper grasp (0.105) to ensure visual contact
+        grasp_z = target_pose.z + 0.105 
         
         grasp_target_pos = [grasp_x, grasp_y, grasp_z]
         grasp_orn = p.getQuaternionFromEuler([3.14, 0, 0]) # Face down
@@ -126,29 +126,59 @@ class UnderArmReachingTask:
         # 2. Pan Hover Position
         pan_pose = pan["pose"]
         pan_hover_pos = [pan_pose.x, pan_pose.y, pan_pose.z + 0.35]
+        
+        # Lift Position (Start of Phase 2)
+        lift_pos = [grasp_x, grasp_y - 0.05, grasp_z + 0.20]
 
         q_start, _ = sim.get_joint_state(arm="right")
         
-        # --- PHASE 1: Start -> Bowl Hover ---
-        LOGGER.info("Phase 1: Planning Path to Bowl...")
-        
+        # --- PRE-COMPUTE PLANS ---
+        LOGGER.info("Pre-planning: Computing all paths before execution...")
+
+        # 1. Path to Bowl
         q_bowl_hover = self._find_valid_goal(sim, bowl_hover_pos, grasp_orn, trials=100)
         if q_bowl_hover is None:
             LOGGER.error("CRITICAL: Could not find valid configuration at Bowl!")
             return False
 
         path_to_bowl = self._rrt_connect(sim, q_start, q_bowl_hover, max_iter=5000) 
-        
         if not path_to_bowl:
             LOGGER.error("RRT Failed to find path to Bowl!")
             return False
-
-        LOGGER.info("Smoothing Path to Bowl...")
         path_to_bowl = self._smooth_path(sim, path_to_bowl)
+        
+        # 2. Path to Pan
+        # We need the configuration AFTER the lift to start the second RRT plan.
+        # We estimate q_lift by solving IK for the lift_pos, using q_bowl_hover as a seed.
+        q_lift = self._solve_ik_safe(sim, lift_pos, grasp_orn, rest_pose=q_bowl_hover, margin=0.002)
+        if q_lift is None:
+             # Fallback
+             q_lift = self._find_valid_goal(sim, lift_pos, grasp_orn, trials=50)
+             
+        if q_lift is None:
+            LOGGER.error("CRITICAL: Could not find valid configuration at Lift Pose!")
+            return False
+            
+        q_pan_hover = self._find_valid_goal(sim, pan_hover_pos, grasp_orn, trials=50)
+        if q_pan_hover is None:
+             LOGGER.error("CRITICAL: Could not find valid configuration at Pan!")
+             return False
+        
+        # Plan path assuming arm-only collisions (bowl collisions handled by safety margins/luck in this simplified scope)
+        path_to_pan = self._rrt_connect(sim, q_lift, q_pan_hover, max_iter=5000)
+        if not path_to_pan:
+            LOGGER.error("RRT Failed to find path to Pan!")
+            return False
+        path_to_pan = self._smooth_path(sim, path_to_pan)
 
-        # Execute Phase 1
+        LOGGER.info("Planning complete. Starting Execution...")
+
+        # --- EXECUTION ---
+
+        # --- PHASE 1: Start -> Bowl Hover ---
         LOGGER.info(f"Moving to Bowl Hover ({len(path_to_bowl)} steps)...")
-        self._execute_path(sim, path_to_bowl) # Fast move to hover is fine
+        # Faster approach (2.0s)
+        self._execute_path_interpolated(sim, path_to_bowl, total_time=2.0)
         sim.gripper_open(arm="right")
         time.sleep(0.5)
         
@@ -156,14 +186,17 @@ class UnderArmReachingTask:
         LOGGER.info("Descending to grasp...")
         # Disable collision to prevent premature stop
         self._set_gripper_collision(sim, bowl_id, enable=False)
+        # Faster descent
         self._linear_move(sim, grasp_target_pos, grasp_orn, steps=60)
+        
+        # Re-enable collision BEFORE closing so fingers physically press the wall
+        self._set_gripper_collision(sim, bowl_id, enable=True)
         
         # Grasp
         sim.gripper_close(arm="right", force=200.0)
         for _ in range(50): sim.step_simulation(1)
         
-        # Re-enable collision and settle
-        self._set_gripper_collision(sim, bowl_id, enable=True)
+        # Settle
         for _ in range(20): sim.step_simulation(1)
         
         # Constrain
@@ -171,50 +204,29 @@ class UnderArmReachingTask:
         self._grasped_object_id = bowl_id
         
         # Lift slightly
-        lift_pos = [grasp_x, grasp_y - 0.05, grasp_z + 0.20]
-        self._linear_move(sim, lift_pos, grasp_orn, steps=80)
+        # Faster lift
+        self._linear_move(sim, lift_pos, grasp_orn, steps=60)
+        
+        # BRIDGE: Smooth transition to exact RRT start config to avoid jerk
+        LOGGER.info("Adjusting grip for transport...")
+        self._move_joints_smooth(sim, q_lift, duration=0.5)
 
         # --- PHASE 2: Bowl Hover -> Pan Hover ---
-        LOGGER.info("Phase 2: Planning Path to Pan...")
-        
-        # --- MAGIC FREEZE ---
-        if self._active_constraint_id is not None:
-            p.removeConstraint(self._active_constraint_id, physicsClientId=sim.client_id)
-        p.changeDynamics(bowl_id, -1, mass=0)
-        
-        q_at_bowl, _ = sim.get_joint_state(arm="right")
-        
-        q_pan_hover = self._find_valid_goal(sim, pan_hover_pos, grasp_orn, trials=50)
-        if q_pan_hover is None:
-             LOGGER.error("CRITICAL: Could not find valid configuration at Pan!")
-             return False
-        
-        # Use start_safety_override=True since we are holding the bowl
-        path_to_pan = self._rrt_connect(sim, q_at_bowl, q_pan_hover, max_iter=5000, start_safety_override=True)
-        
-        # --- RESTORE ---
-        self._restore_state(sim, q_at_bowl)
-        p.changeDynamics(bowl_id, -1, mass=0.3) 
-        self._active_constraint_id = self._create_grasp_constraint(sim, bowl_id)
-        
-        if not path_to_pan:
-            LOGGER.error("RRT Failed to find path to Pan!")
-            return False
-            
-        LOGGER.info("Smoothing Path to Pan...")
-        path_to_pan = self._smooth_path(sim, path_to_pan)
-        
-        # Execute Phase 2 - SLOWLY
         LOGGER.info(f"Moving to Pan ({len(path_to_pan)} steps)...")
-        self._execute_path_interpolated(sim, path_to_pan, total_time=4.0)
+        # Faster transport (1.5s)
+        self._execute_path_interpolated(sim, path_to_pan, total_time=1.5)
         time.sleep(0.5)
 
         # --- PHASE 3: Pour ---
         LOGGER.info("Pouring...")
-        tilt_orn = p.getQuaternionFromEuler([3.14, -2.0, 0.0]) 
-        self._linear_move(sim, pan_hover_pos, tilt_orn, steps=150)
-        for _ in range(100): sim.step_simulation(1)
-        self._linear_move(sim, pan_hover_pos, grasp_orn, steps=80)
+        # Steeper angle (-3.1 rad) to fully invert container
+        tilt_orn = p.getQuaternionFromEuler([3.14, -3.1, 0.0]) 
+        
+        # Slower, smoother pour (600 steps)
+        self._linear_move(sim, pan_hover_pos, tilt_orn, steps=600)
+        for _ in range(50): sim.step_simulation(1)
+        # Faster return (200 steps)
+        self._linear_move(sim, pan_hover_pos, grasp_orn, steps=200)
 
         metrics = sim.count_particles_in_pan()
         LOGGER.info(f"Task Complete. Metrics: {metrics}")
@@ -222,6 +234,18 @@ class UnderArmReachingTask:
     
     # ------------------------------------------------------------------ #
     # Helpers
+
+    def _move_joints_smooth(self, sim, q_target, duration=1.0):
+        """Linearly interpolates joint positions to a target configuration."""
+        q_current, _ = sim.get_joint_state(arm="right")
+        steps = int(duration * 240) # 240Hz physics
+        if steps < 1: steps = 1
+        for t in np.linspace(0, 1, steps):
+            q = q_current + (q_target - q_current) * t
+            sim.set_joint_positions(q, arm="right")
+            sim.step_simulation(1)
+            if self._grasped_object_id is not None:
+                sim.gripper_close(arm="right", force=60.0)
 
     def _set_gripper_collision(self, sim, object_id, enable=True):
         """Enables or disables collision between gripper fingers and object."""
@@ -340,7 +364,10 @@ class UnderArmReachingTask:
         current_orn = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, physicsClientId=sim.client_id)[5]
         for t in np.linspace(0, 1, steps):
             pos = np.array(current_pos) * (1 - t) + np.array(target_pos) * t
-            orn = target_orn 
+            
+            # Fix: Interpolate orientation using Slerp to avoid aggressive snap
+            orn = p.getQuaternionSlerp(current_orn, target_orn, t)
+            
             full_ik = p.calculateInverseKinematics(
                 sim.right_arm.body_id, sim.right_arm.ee_link, pos, orn,
                 physicsClientId=sim.client_id
