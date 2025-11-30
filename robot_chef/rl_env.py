@@ -269,15 +269,15 @@ class RobotChefSimulation(gym.Env):
         dist_between_bowls_xy = np.sqrt((bowl_one_pos[0] - bowl_two_pos[0])**2 + (bowl_one_pos[1] - bowl_two_pos[1])**2)
         
         if dist_between_bowls_xy < 0.2:
-            reward += ((0.2 - dist_between_bowls_xy) / 0.2) * 2.0
+            reward += ((0.2 - dist_between_bowls_xy) / 0.2) * 40.0
         else:
-            reward -= min((dist_between_bowls_xy - 0.2) * 5.0, 10.0)
+            reward -= min((dist_between_bowls_xy - 0.2) * 50.0, 20.0)
         
         height_diff = abs(bowl_one_pos[2] - bowl_two_pos[2])
         if height_diff > 0.25:
-            reward -= min(height_diff * 50.0, 35.0)
+            reward -= min(height_diff * 50.0, 20.0)
         elif height_diff < 0.07:
-            reward -= 35.0
+            reward -= 20.0
         else:
             reward += 0.5
 
@@ -285,9 +285,9 @@ class RobotChefSimulation(gym.Env):
         tilt_angle = abs(bowl_euler[0]) + abs(bowl_euler[1])
         if dist_between_bowls_xy < 0.2:
             if tilt_angle > 0.3:
-                reward += min(tilt_angle * 2.0, 2.0)
+                reward += min(tilt_angle * 10.0, 20.0)
             else:
-                reward -= 0.2
+                reward -= 2.0
 
         if dist_between_bowls_xy > 0.3 and tilt_angle > 0.5:
             reward -= 12.0
