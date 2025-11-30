@@ -275,9 +275,9 @@ class RobotChefSimulation(gym.Env):
         
         height_diff = abs(bowl_one_pos[2] - bowl_two_pos[2])
         if height_diff > 0.25:
-            reward -= min(height_diff * 30.0, 25.0)
+            reward -= min(height_diff * 50.0, 35.0)
         elif height_diff < 0.07:
-            reward -= 32.0
+            reward -= 35.0
         else:
             reward += 0.5
 
