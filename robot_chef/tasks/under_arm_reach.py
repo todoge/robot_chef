@@ -10,7 +10,7 @@ import pybullet as p
 import numpy as np
 
 from ..config import PourTaskConfig, Pose6D
-from ..simulation import RobotChefSimulation
+from ..simulation import RobotChefSimulation # Explicit import for type checking
 from ..env.objects import create_specula
 
 LOGGER = logging.getLogger(__name__)
@@ -18,15 +18,16 @@ LOGGER = logging.getLogger(__name__)
 class UnderArmReachingTask:
     """
     Scenario:
-    1. Left Arm: Holds a specula and hovers rigidly over the table.
+    1. Left Arm: Holds a specula and hovers rigidly over the table (Obstacle).
     2. Target: A bowl placed underneath/behind the Left Arm's bridge.
-    3. Goal: Right Arm starts at home, must path plan to grasp the bowl without hitting the Left Arm.
+    3. Task: Right Arm navigates from Start -> Bowl (Phase 1), then Bowl -> Pan (Phase 2).
     """
 
     def __init__(self) -> None:
         self.sim = None
         self.cfg = None
-        self._grasped_object_id = None # Track what we are holding
+        self._grasped_object_id = None 
+        self._active_constraint_id = None
 
     def setup(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> None:
         self.sim = sim
@@ -45,8 +46,8 @@ class UnderArmReachingTask:
         left_arm = sim.left_arm
         
         # Move Left Arm to a "Blocking" configuration
-        # UPDATED: Rotated base to -1.2 to point arm towards the right side
-        blocking_joints = [-1.2, 0.3, 0.0, -1.4, 0.0, 2.0, 0.785]
+        # Rotated base to -1.8 to point arm towards the front-right sector (obstacle mode)
+        blocking_joints = [-1.8, 0.3, 0.0, -1.4, 0.0, 2.0, 0.785]
         
         sim.set_joint_positions(blocking_joints, arm="left")
         sim.step_simulation(50) 
@@ -93,7 +94,7 @@ class UnderArmReachingTask:
 
     def execute(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
         """
-        Execute RRT Reach -> Grasp -> Safe Neutral -> Move to Pan -> Pour.
+        Execute RRT: Start -> Bowl Hover -> Pan Hover (Simplified).
         """
         LOGGER.info("Execution: Calculating RRT Path...")
         
@@ -102,148 +103,140 @@ class UnderArmReachingTask:
         if not bowl or not pan: return False
 
         target_pose = bowl["pose"]
-        
-        # --- CALCULATE RIM GRASP ---
-        # Bowl properties from create_rice_bowl
+        bowl_id = int(bowl["body_id"])
         bowl_radius = 0.07 
-        bowl_rim_height = 0.08 # wall_height
-        bowl_base_z = target_pose.z
         
-        # Grasp Target: The TOP edge of the rim (closest to robot)
-        # y - radius puts us at the front edge
+        # --- Define Targets ---
+        # 1. Bowl Edge Hover Position
         grasp_x = target_pose.x
         grasp_y = target_pose.y - bowl_radius 
         
-        # IMPORTANT FIX: Account for Hand Length (Palm to Finger center ~10.3cm)
-        # If we send the "Hand Link" to the rim height, the fingers smash into the floor.
-        # We must offset the Z target UP by the finger length so the TIPS land on the rim.
-        HAND_OFFSET_Z = 0.103 
-        
-        # Target Tip Position: 1.5cm below rim top
-        tip_z = bowl_base_z + bowl_rim_height - 0.015
-        
-        # Target Link Position: Tip Z + Hand Length
-        grasp_z = tip_z + HAND_OFFSET_Z
+        # Target Z: Wrist/Palm position.
+        # Fingers are ~10cm long. Bowl is ~8cm high.
+        # To grasp rim (top ~8cm), wrist should be at ~18cm.
+        # To grasp deep (middle ~4cm), wrist should be at ~14cm.
+        grasp_z = target_pose.z + 0.14 
         
         grasp_target_pos = [grasp_x, grasp_y, grasp_z]
         grasp_orn = p.getQuaternionFromEuler([3.14, 0, 0]) # Face down
 
-        LOGGER.info(f"Bowl Center: {target_pose.position}")
-        LOGGER.info(f"Calculated Rim Grasp Target (Link): {grasp_target_pos} (Tips at {tip_z:.3f})")
+        # Hover 10cm above grasp
+        bowl_hover_pos = [grasp_x, grasp_y, grasp_z + 0.10]
+
+        # 2. Pan Hover Position
+        pan_pose = pan["pose"]
+        pan_hover_pos = [pan_pose.x, pan_pose.y, pan_pose.z + 0.35]
 
         q_start, _ = sim.get_joint_state(arm="right")
         
-        # --- 1. RRT: Home -> Pre-Grasp (Hover) ---
-        # Search for valid goal
-        q_pre_grasp = None
-        for hover_gap in np.linspace(0.30, 0.10, 5): 
-            # Hover directly above the RIM grasp point, not center
-            test_pos = [grasp_x, grasp_y, grasp_z + hover_gap]
-            q_pre_grasp = self._find_valid_goal(sim, test_pos, grasp_orn, trials=100)
-            if q_pre_grasp is not None:
-                LOGGER.info(f"Found valid Pre-Grasp at hover gap +{hover_gap:.2f}m")
-                break
+        # --- PHASE 1: Start -> Bowl Hover ---
+        LOGGER.info("Phase 1: Planning Path to Bowl...")
         
-        if q_pre_grasp is None:
-            LOGGER.error("CRITICAL: Could not find ANY valid goal configuration!")
+        q_bowl_hover = self._find_valid_goal(sim, bowl_hover_pos, grasp_orn, trials=100)
+        if q_bowl_hover is None:
+            LOGGER.error("CRITICAL: Could not find valid configuration at Bowl!")
             return False
 
-        LOGGER.info("Planning Path to Pre-Grasp...")
-        path_in = self._rrt_connect(sim, q_start, q_pre_grasp, max_iter=5000) 
+        path_to_bowl = self._rrt_connect(sim, q_start, q_bowl_hover, max_iter=5000) 
         
-        if not path_in:
-            LOGGER.error("RRT Failed to find path IN!")
+        if not path_to_bowl:
+            LOGGER.error("RRT Failed to find path to Bowl!")
             return False
 
-        LOGGER.info("Smoothing Path IN...")
-        path_in = self._smooth_path(sim, path_in)
+        LOGGER.info("Smoothing Path to Bowl...")
+        path_to_bowl = self._smooth_path(sim, path_to_bowl)
 
-        # Execute Path IN
-        LOGGER.info(f"Moving to hover ({len(path_in)} steps)...")
-        self._execute_path(sim, path_in)
+        # Execute Phase 1
+        LOGGER.info(f"Moving to Bowl Hover ({len(path_to_bowl)} steps)...")
+        self._execute_path(sim, path_to_bowl) # Fast move to hover is fine
         sim.gripper_open(arm="right")
         time.sleep(0.5)
-
-        # --- 2. Cartesian: Grasp Sequence ---
-        LOGGER.info("Descending to grasp rim...")
-        self._linear_move(sim, grasp_target_pos, grasp_orn, steps=40)
         
-        # --- MAGIC GRASP ---
-        # Freeze Bowl temporarily to prevent spin during grasp
-        bowl_id = int(bowl["body_id"])
-        p.changeDynamics(bowl_id, -1, mass=0) # Make static
+        # --- PHASE 1b: Descend & Grasp ---
+        LOGGER.info("Descending to grasp...")
+        # Disable collision to prevent premature stop
+        self._set_gripper_collision(sim, bowl_id, enable=False)
+        self._linear_move(sim, grasp_target_pos, grasp_orn, steps=60)
         
-        sim.gripper_close(arm="right", force=60.0)
+        # Grasp
+        sim.gripper_close(arm="right", force=200.0)
         for _ in range(50): sim.step_simulation(1)
         
-        # Restore mass and Lock bowl to gripper
-        p.changeDynamics(bowl_id, -1, mass=0.3)
-        self._create_grasp_constraint(sim, bowl_id)
+        # Re-enable collision and settle
+        self._set_gripper_collision(sim, bowl_id, enable=True)
+        for _ in range(20): sim.step_simulation(1)
+        
+        # Constrain
+        self._active_constraint_id = self._create_grasp_constraint(sim, bowl_id)
         self._grasped_object_id = bowl_id
+        
+        # Lift slightly
+        lift_pos = [grasp_x, grasp_y - 0.05, grasp_z + 0.20]
+        self._linear_move(sim, lift_pos, grasp_orn, steps=80)
 
-        LOGGER.info("Lifting bowl (retracting slightly)...")
-        # Lift UP and slightly AWAY (back towards robot) to clear the arch
-        lift_pos = [grasp_x, grasp_y - 0.1, grasp_z + 0.20]
-        self._linear_move(sim, lift_pos, grasp_orn, steps=40)
-
-        # --- 3. RRT: Lift -> Safe Neutral (Retract) ---
-        LOGGER.info("Planning Path to Safe Neutral...")
+        # --- PHASE 2: Bowl Hover -> Pan Hover ---
+        LOGGER.info("Phase 2: Planning Path to Pan...")
         
-        # Neutral Pose
-        q_neutral = np.array([-0.8, -0.2, 0.0, -2.0, 0.0, 1.8, 0.785])
+        # --- MAGIC FREEZE ---
+        if self._active_constraint_id is not None:
+            p.removeConstraint(self._active_constraint_id, physicsClientId=sim.client_id)
+        p.changeDynamics(bowl_id, -1, mass=0)
         
-        # CRITICAL FIX: Re-read state fresh from physics engine
-        q_lifted, _ = sim.get_joint_state(arm="right")
+        q_at_bowl, _ = sim.get_joint_state(arm="right")
         
-        # UPDATED: Use start_safety_override=True because we are holding the bowl
-        path_out = self._rrt_connect(sim, q_lifted, q_neutral, max_iter=5000, start_safety_override=True)
+        q_pan_hover = self._find_valid_goal(sim, pan_hover_pos, grasp_orn, trials=50)
+        if q_pan_hover is None:
+             LOGGER.error("CRITICAL: Could not find valid configuration at Pan!")
+             return False
         
-        if not path_out:
-            LOGGER.error("RRT Failed to find path OUT to neutral!")
+        # Use start_safety_override=True since we are holding the bowl
+        path_to_pan = self._rrt_connect(sim, q_at_bowl, q_pan_hover, max_iter=5000, start_safety_override=True)
+        
+        # --- RESTORE ---
+        self._restore_state(sim, q_at_bowl)
+        p.changeDynamics(bowl_id, -1, mass=0.3) 
+        self._active_constraint_id = self._create_grasp_constraint(sim, bowl_id)
+        
+        if not path_to_pan:
+            LOGGER.error("RRT Failed to find path to Pan!")
             return False
             
-        LOGGER.info("Smoothing Path OUT...")
-        path_out = self._smooth_path(sim, path_out)
+        LOGGER.info("Smoothing Path to Pan...")
+        path_to_pan = self._smooth_path(sim, path_to_pan)
         
-        LOGGER.info(f"Retracting to Neutral ({len(path_out)} steps)...")
-        self._execute_path(sim, path_out)
+        # Execute Phase 2 - SLOWLY
+        LOGGER.info(f"Moving to Pan ({len(path_to_pan)} steps)...")
+        self._execute_path_interpolated(sim, path_to_pan, total_time=4.0)
         time.sleep(0.5)
 
-        # --- 4. Cartesian: Neutral -> Pan ---
-        LOGGER.info("Moving to Pan...")
-        pan_pose = pan["pose"]
-        # Pour Pos: Center of pan, Z high enough.
-        # Add HAND_OFFSET_Z here too so tips are at correct height!
-        pour_z_clearance = 0.30
-        pour_pos = [pan_pose.x, pan_pose.y, pan_pose.z + pour_z_clearance + HAND_OFFSET_Z]
-        self._linear_move(sim, pour_pos, grasp_orn, steps=60)
-        
-        # --- 5. Pour (Tilt) ---
+        # --- PHASE 3: Pour ---
         LOGGER.info("Pouring...")
-        tilt_orn = p.getQuaternionFromEuler([3.14, -2.1, 0.0]) 
-        self._linear_move(sim, pour_pos, tilt_orn, steps=80)
-        
-        for _ in range(120): sim.step_simulation(1)
-        
-        LOGGER.info("Untilting...")
-        self._linear_move(sim, pour_pos, grasp_orn, steps=50)
+        tilt_orn = p.getQuaternionFromEuler([3.14, -2.0, 0.0]) 
+        self._linear_move(sim, pan_hover_pos, tilt_orn, steps=150)
+        for _ in range(100): sim.step_simulation(1)
+        self._linear_move(sim, pan_hover_pos, grasp_orn, steps=80)
 
         metrics = sim.count_particles_in_pan()
         LOGGER.info(f"Task Complete. Metrics: {metrics}")
-        
         return True
     
     # ------------------------------------------------------------------ #
     # Helpers
 
+    def _set_gripper_collision(self, sim, object_id, enable=True):
+        """Enables or disables collision between gripper fingers and object."""
+        arm = sim.right_arm
+        for i in range(p.getNumJoints(arm.body_id, physicsClientId=sim.client_id)):
+            info = p.getJointInfo(arm.body_id, i, physicsClientId=sim.client_id)
+            link_name = info[12].decode()
+            if "finger" in link_name or "hand" in link_name:
+                p.setCollisionFilterPair(arm.body_id, object_id, i, -1, int(enable), physicsClientId=sim.client_id)
+
     def _create_grasp_constraint(self, sim, object_id):
         """Creates a fixed constraint between the gripper palm and the object."""
-        # Find Panda Hand link index
         arm = sim.right_arm
-        # 11 is usually panda_hand, but use ee_link just in case
         parent_link = arm.ee_link 
         
-        # Get current poses
         parent_state = p.getLinkState(arm.body_id, parent_link, computeForwardKinematics=True, physicsClientId=sim.client_id)
         parent_pos = np.array(parent_state[4])
         parent_orn = np.array(parent_state[5])
@@ -252,12 +245,9 @@ class UnderArmReachingTask:
         child_pos = np.array(child_state[0])
         child_orn = np.array(child_state[1])
         
-        # Calculate relative pose: T_parent_inv * T_child
-        # This gives child frame in parent frame
         inv_parent_pos, inv_parent_orn = p.invertTransform(parent_pos, parent_orn)
         rel_pos, rel_orn = p.multiplyTransforms(inv_parent_pos, inv_parent_orn, child_pos, child_orn)
         
-        # Create constraint using the computed relative pose
         cid = p.createConstraint(
             parentBodyUniqueId=arm.body_id,
             parentLinkIndex=parent_link,
@@ -271,38 +261,28 @@ class UnderArmReachingTask:
             childFrameOrientation=[0, 0, 0, 1], # Identity
             physicsClientId=sim.client_id
         )
-        
         p.changeConstraint(cid, maxForce=2000)
         LOGGER.info(f"Grasp constraint created (ID {cid}) with relative lock")
         return cid
 
     def _find_valid_goal(self, sim, target_pos, target_orn, trials=100):
         """Attempts to find a valid IK solution by trying random IK seeds (rest poses)."""
-        
-        # 1. Try Default
         q = self._solve_ik_safe(sim, target_pos, target_orn, margin=0.002) 
         if q is not None: 
             return q
-            
-        LOGGER.warning(f"Exact Pre-Grasp at z={target_pos[2]:.2f} in collision. Attempting IK with random seeds...")
-        
+        LOGGER.warning(f"Exact Pose at z={target_pos[2]:.2f} in collision. Attempting IK with random seeds...")
         arm = sim.right_arm
-        
-        # 2. Randomize Posture (Null Space Search)
         for i in range(trials):
             random_rest = []
             for j in range(len(arm.joint_lower)):
                 val = random.uniform(arm.joint_lower[j], arm.joint_upper[j])
                 random_rest.append(val)
-            
             noise = np.random.uniform(-0.05, 0.05, 3)
             perturbed_pos = np.array(target_pos) + noise
-            
             q = self._solve_ik_safe(sim, perturbed_pos, target_orn, rest_pose=random_rest, margin=0.002)
             if q is not None:
                 LOGGER.info(f"Found valid goal after {i+1} random seeds.")
                 return q
-                
         return None
 
     def _solve_ik_safe(self, sim, pos, orn, rest_pose=None, debug=False, margin=0.005):
@@ -322,27 +302,45 @@ class UnderArmReachingTask:
             args["upperLimits"] = list(arm.joint_upper)
             args["jointRanges"] = list(arm.joint_ranges)
             args["restPoses"] = list(rest_pose)
-        
         full_ik = p.calculateInverseKinematics(**args)
         q = np.array(full_ik[:7])
-        
         if not self._check_collision(sim, q, debug=debug, margin=margin):
             return q
         return None
 
-    def _execute_path(self, sim, path):
+    def _execute_path(self, sim, path, steps_per_point=5):
+        """Executes a joint path with specified slowness."""
         for q in path:
             sim.set_joint_positions(q, arm="right")
-            for _ in range(5): sim.step_simulation(1)
+            for _ in range(steps_per_point): sim.step_simulation(1)
+    
+    def _execute_path_interpolated(self, sim, path, total_time=2.0):
+        """Linearly interpolates through path waypoints to ensure slow, smooth motion."""
+        if len(path) < 2: return
+        steps_per_sec = 240
+        total_steps = int(total_time * steps_per_sec)
+        dists = [np.linalg.norm(np.array(path[i+1]) - np.array(path[i])) for i in range(len(path)-1)]
+        total_dist = sum(dists)
+        if total_dist == 0: return
+        for i in range(len(path)-1):
+            q1 = np.array(path[i])
+            q2 = np.array(path[i+1])
+            segment_dist = dists[i]
+            segment_steps = int((segment_dist / total_dist) * total_steps)
+            segment_steps = max(1, segment_steps)
+            for t in np.linspace(0, 1, segment_steps):
+                q_interp = q1 + (q2 - q1) * t
+                sim.set_joint_positions(q_interp, arm="right")
+                sim.step_simulation(1)
+                if self._grasped_object_id is not None:
+                    sim.gripper_close(arm="right", force=60.0)
 
     def _linear_move(self, sim, target_pos, target_orn, steps=60):
         current_pos = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, physicsClientId=sim.client_id)[4]
         current_orn = p.getLinkState(sim.right_arm.body_id, sim.right_arm.ee_link, physicsClientId=sim.client_id)[5]
-        
         for t in np.linspace(0, 1, steps):
             pos = np.array(current_pos) * (1 - t) + np.array(target_pos) * t
             orn = target_orn 
-            
             full_ik = p.calculateInverseKinematics(
                 sim.right_arm.body_id, sim.right_arm.ee_link, pos, orn,
                 physicsClientId=sim.client_id
@@ -368,11 +366,7 @@ class UnderArmReachingTask:
             body_b = c[2]
             if body_b == sim.right_arm.body_id: continue
             if right_mount_id is not None and body_b == right_mount_id: continue
-            
-            # IGNORE GRASPED OBJECT
-            if self._grasped_object_id is not None and body_b == self._grasped_object_id:
-                continue
-
+            if self._grasped_object_id is not None and body_b == self._grasped_object_id: continue
             if debug:
                 body_name = p.getBodyInfo(body_b, physicsClientId=sim.client_id)[1].decode()
                 LOGGER.debug(f"Collision detected with Body ID {body_b} ({body_name})")
@@ -393,128 +387,143 @@ class UnderArmReachingTask:
                 
         return False
 
-    def _check_segment_collision(self, sim: RobotChefSimulation, q1: np.ndarray, q2: np.ndarray, step_rad: float = 0.02) -> bool:
+    def _check_segment_collision(self, sim: RobotChefSimulation, q1: np.ndarray, q2: np.ndarray, step_rad: float = 0.02, margin: float = 0.005) -> bool:
         dist = np.linalg.norm(q2 - q1)
         steps = int(math.ceil(dist / step_rad))
         
         if steps <= 1:
-            return self._check_collision(sim, q2)
+            return self._check_collision(sim, q2, margin=margin)
             
         for k in range(1, steps + 1):
             t = k / steps
             q_interp = q1 + (q2 - q1) * t
-            if self._check_collision(sim, q_interp):
+            if self._check_collision(sim, q_interp, margin=margin):
                 return True
         return False
     
     def _restore_state(self, sim: RobotChefSimulation, q: np.ndarray):
         for i, idx in enumerate(sim.right_arm.joint_indices):
             p.resetJointState(sim.right_arm.body_id, idx, q[i], physicsClientId=sim.client_id)
-            # CRITICAL: Also reset velocities to zero to stop "flinging"
             p.resetJointState(sim.right_arm.body_id, idx, q[i], targetVelocity=0.0, physicsClientId=sim.client_id)
 
-    def _rrt_connect(self, sim: RobotChefSimulation, q_start: np.ndarray, q_goal: np.ndarray, max_iter=5000, start_safety_override=False) -> list:
-        # Check endpoints first
-        # Use override to skip start check if requested (e.g. holding object)
-        if not start_safety_override and self._check_collision(sim, q_start):
-             LOGGER.error("RRT Start Configuration is in collision.")
-             return []
-        if self._check_collision(sim, q_goal, debug=True): 
-             LOGGER.error("RRT Goal Configuration is in collision.")
-             return []
-
-        J_MIN = np.array([-2.8, -1.7, -2.8, -3.0, -2.8, -0.01, -2.8])
-        J_MAX = np.array([ 2.8,  1.7,  2.8, -0.06, 2.8,  3.7,  2.8])
+    def _rrt_connect(self, sim: RobotChefSimulation, q_start: np.ndarray, q_goal: np.ndarray, max_iter=5000, start_safety_override=False, collision_margin=0.005) -> list:
         
+        # Disable rendering during planning to prevent "ghost" flickering
+        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0, physicsClientId=sim.client_id)
+        
+        # Capture current state before any manipulation (especially useful if q_start is not exactly current state)
         q_real_start, _ = sim.get_joint_state(arm="right")
 
-        class Node:
-            def __init__(self, q, parent):
-                self.q = q
-                self.parent = parent
-
-        start_node = Node(q_start, None)
-        goal_node = Node(q_goal, None)
-        
-        tree_a = [start_node]
-        tree_b = [goal_node]
-        
-        step_size = 0.08 
-
-        def get_nearest(tree, q_rand):
-            dists = [np.linalg.norm(node.q - q_rand) for node in tree]
-            idx = np.argmin(dists)
-            return tree[idx]
-
-        def extend(tree, q_target):
-            nearest = get_nearest(tree, q_target)
-            direction = q_target - nearest.q
-            dist = np.linalg.norm(direction)
+        try:
+            # Check endpoints first
+            if not start_safety_override and self._check_collision(sim, q_start, margin=collision_margin):
+                 LOGGER.error("RRT Start Configuration is in collision.")
+                 return []
+            if self._check_collision(sim, q_goal, debug=True, margin=collision_margin): 
+                 LOGGER.error("RRT Goal Configuration is in collision.")
+                 return []
+    
+            J_MIN = np.array([-2.8, -1.7, -2.8, -3.0, -2.8, -0.01, -2.8])
+            J_MAX = np.array([ 2.8,  1.7,  2.8, -0.06, 2.8,  3.7,  2.8])
+    
+            class Node:
+                def __init__(self, q, parent):
+                    self.q = q
+                    self.parent = parent
+    
+            start_node = Node(q_start, None)
+            goal_node = Node(q_goal, None)
             
-            if dist < step_size:
-                q_new = q_target
-            else:
-                q_new = nearest.q + (direction / dist) * step_size
+            tree_a = [start_node]
+            tree_b = [goal_node]
             
-            if not self._check_segment_collision(sim, nearest.q, q_new):
-                new_node = Node(q_new, nearest)
-                tree.append(new_node)
-                if np.linalg.norm(q_new - q_target) < 1e-3:
-                    return "Reached", new_node
-                return "Advanced", new_node
-            
-            return "Trapped", None
-
-        path = []
-        
-        for i in range(max_iter):
-            q_rand = np.random.uniform(J_MIN, J_MAX)
-            status, node_a = extend(tree_a, q_rand)
-            
-            if status != "Trapped":
-                status_b, node_b = extend(tree_b, node_a.q)
-                while status_b == "Advanced":
-                    status_b, node_b = extend(tree_b, node_a.q)
+            step_size = 0.08 
+    
+            def get_nearest(tree, q_rand):
+                dists = [np.linalg.norm(node.q - q_rand) for node in tree]
+                idx = np.argmin(dists)
+                return tree[idx]
+    
+            def extend(tree, q_target):
+                nearest = get_nearest(tree, q_target)
+                direction = q_target - nearest.q
+                dist = np.linalg.norm(direction)
                 
-                if status_b == "Reached":
-                    LOGGER.info(f"RRT Connected at iter {i}")
-                    
-                    curr = node_a
-                    while curr:
-                        path.append(curr.q)
-                        curr = curr.parent
-                    path.reverse()
-                    
-                    curr = node_b.parent
-                    while curr:
-                        path.append(curr.q)
-                        curr = curr.parent
-                        
-                    break
+                if dist < step_size:
+                    q_new = q_target
+                else:
+                    q_new = nearest.q + (direction / dist) * step_size
+                
+                if not self._check_segment_collision(sim, nearest.q, q_new, margin=collision_margin):
+                    new_node = Node(q_new, nearest)
+                    tree.append(new_node)
+                    if np.linalg.norm(q_new - q_target) < 1e-3:
+                        return "Reached", new_node
+                    return "Advanced", new_node
+                
+                return "Trapped", None
+    
+            path = []
             
-            tree_a, tree_b = tree_b, tree_a
-
-        self._restore_state(sim, q_real_start)
+            for i in range(max_iter):
+                q_rand = np.random.uniform(J_MIN, J_MAX)
+                status, node_a = extend(tree_a, q_rand)
+                
+                if status != "Trapped":
+                    status_b, node_b = extend(tree_b, node_a.q)
+                    while status_b == "Advanced":
+                        status_b, node_b = extend(tree_b, node_a.q)
+                    
+                    if status_b == "Reached":
+                        LOGGER.info(f"RRT Connected at iter {i}")
+                        
+                        curr = node_a
+                        while curr:
+                            path.append(curr.q)
+                            curr = curr.parent
+                        path.reverse()
+                        
+                        curr = node_b.parent
+                        while curr:
+                            path.append(curr.q)
+                            curr = curr.parent
+                            
+                        break
+                
+                tree_a, tree_b = tree_b, tree_a
+        
+        finally:
+            # ALWAYS restore state and rendering, even on error
+            self._restore_state(sim, q_real_start)
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1, physicsClientId=sim.client_id)
+            
         return path
 
-    def _smooth_path(self, sim, path, iterations=50):
-        if len(path) < 3: return path
+    def _smooth_path(self, sim, path, iterations=50, collision_margin=0.005):
+        # Disable rendering for smoother
+        p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0, physicsClientId=sim.client_id)
         
+        # Capture start state for restore
         q_real_start, _ = sim.get_joint_state(arm="right")
-        
-        for _ in range(iterations):
-            if len(path) < 3: break
+
+        try:
+            if len(path) < 3: return path
             
-            i, j = sorted(random.sample(range(len(path)), 2))
-            if j - i <= 1: continue 
-            
-            q1 = path[i]
-            q2 = path[j]
-            
-            if not self._check_segment_collision(sim, q1, q2):
-                path = path[:i+1] + path[j:]
+            for _ in range(iterations):
+                if len(path) < 3: break
                 
-        self._restore_state(sim, q_real_start)
+                i, j = sorted(random.sample(range(len(path)), 2))
+                if j - i <= 1: continue 
+                
+                q1 = path[i]
+                q2 = path[j]
+                
+                if not self._check_segment_collision(sim, q1, q2, margin=collision_margin):
+                    path = path[:i+1] + path[j:]
+        finally:
+            self._restore_state(sim, q_real_start)
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1, physicsClientId=sim.client_id)
+            
         return path
 
     def metrics(self, sim: RobotChefSimulation) -> Dict[str, float]:
