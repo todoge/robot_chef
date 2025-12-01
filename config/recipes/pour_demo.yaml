@@ -1,10 +1,12 @@
-bowl_pose: [0.25, 0.35, 0.75, 0.0, 0.0, 0.0]
-pan_pose:  [0.42, 0.02, 0.75, 0.0, 0.0, -2.79]
-pan_pour_pose: [0.42, 0.02, 0.94, 3.1416, 0.0, 0.0]
+bowl_pose: [0.25, 0.28, 0.75, 0.0, 0.0, 0.0]
+# Moved pan closer: x reduced from 0.42 to 0.35
+pan_pose:  [0.35, 0.02, 0.75, 0.0, 0.0, -2.79]
+# Updated pan_pour_pose to match new pan position (x=0.35)
+pan_pour_pose: [0.35, 0.02, 0.94, 3.1416, 0.0, 0.0]
 
 tilt_angle_deg: 180
 hold_sec: 3.0
-particles: 80
+particles: 20
 tolerances:
   place_back_xy: 0.03
   place_back_yaw_deg: 8
@@ -35,7 +37,8 @@ perception:
   rim_thickness_m: 0.006
 
 task:
-  pan_pour_pose: [0.42, 0.02, 0.94, 3.1416, 0.0, 0.0]
+  # Also update task-specific pose to match (x=0.35)
+  pan_pour_pose: [0.35, 0.02, 0.94, 3.1416, 0.0, 0.0]
   tilt_angle_deg: 140
   hold_sec: 3.0
 

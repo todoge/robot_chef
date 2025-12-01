@@ -453,7 +453,7 @@ class RobotChefSimulation:
     def spawn_rice_particles(
         self,
         count: int,
-        radius: float = 0.005,
+        radius: float = 0.01,  # UPDATED DEFAULT RADIUS
         seed: int = 7,
     ) -> Optional[ParticleSet]:
         bowl_entry = self.objects.get("bowl")

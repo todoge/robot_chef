@@ -222,7 +222,7 @@ def load_pour_task_config(path: Union[str, Path]) -> PourTaskConfig:
 
     tilt_angle_deg = float(data.get("tilt_angle_deg", task_runtime.tilt_angle_deg))
     hold_sec = float(data.get("hold_sec", task_runtime.hold_sec))
-    particles = int(data.get("particles", 0))
+    particles = int(data.get("particles", 30)) # UPDATED DEFAULT PARTICLES
     seed = int(data.get("seed", 0))
 
     camera_cfg = _load_camera(data)

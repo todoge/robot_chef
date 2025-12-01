@@ -49,7 +49,7 @@ def spawn_spheres(
     spawn_height: float,
     seed: int = 7,
     mass: float = 0.01,  
-    friction: float = 0.8,
+    friction: float = 0.2, # Reduced friction (was 0.8)
 ) -> ParticleSet:
     """Spawn spherical particles inside a bowl volume."""
     rng = random.Random(seed)
@@ -81,7 +81,7 @@ def spawn_spheres(
             linkIndex=-1,
             lateralFriction=friction,
             spinningFriction=friction,
-            rollingFriction=friction * 0.5,
+            rollingFriction=0.01, # Reduced rolling friction
             restitution=0.0,
             physicsClientId=client_id,
         )

@@ -150,13 +150,13 @@ class PourBowlIntoPanAndReturn:
         if not candidates: LOGGER.error("No grasp candidates."); return False
 
         MIN_GRASP_WIDTH = 0.005
-        LONG_TIMEOUT = 12.0 # Increased slightly again
-        NORMAL_TIMEOUT = 9.0 # Increased slightly again
+        LONG_TIMEOUT = 6.0
+        NORMAL_TIMEOUT = 4.0
 
-        POUR_STEPS = 150 # Even more steps
-        TOTAL_POUR_TIME_S = 8.0 # Pour over 10 seconds
+        POUR_STEPS = 80
+        TOTAL_POUR_TIME_S = 3.0
         POUR_STEP_SIM_TIME = max(1, int( (TOTAL_POUR_TIME_S / POUR_STEPS) / sim.dt ))
-        POUR_STEP_GAIN = 0.015 # Very low gain
+        POUR_STEP_GAIN = 0.03
 
 
         for idx, candidate in enumerate(candidates[:3]):
@@ -172,19 +172,34 @@ class PourBowlIntoPanAndReturn:
             if not self.controller.move_waypoint(approach_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Approach failed."); continue
             grasp_pose = position.copy(); grasp_pose[2] += max(0.0, cfg.perception.rim_thickness_m * 0.5) - 0.003
             if not self.controller.move_waypoint(grasp_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Grasp pose failed."); continue
-            self.controller.close_gripper(); LOGGER.info("Pausing after grasp command..."); sim.step_simulation(steps=240)
+            self.controller.close_gripper(); LOGGER.info("Pausing after grasp command..."); sim.step_simulation(steps=60)
             current_width = sim.get_gripper_width(arm=self.active_arm_name)
             if current_width < MIN_GRASP_WIDTH: LOGGER.warning("Grasp FAILED (%.4f < %.4f). Retrying.", current_width, MIN_GRASP_WIDTH); self.controller.open_gripper(); self.controller.move_waypoint(pregrasp_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT); continue
             LOGGER.info("Grasp SUCCEEDED (%.4f).", current_width)
 
-            # === Step 2: Lift the bowl === (Unchanged logic)
+            # === Step 2: Lift the bowl SMOOTHLY ===
             pan_pose_sim: Pose6D = sim.objects["pan"]["pose"]
             if pan_pose_sim is None: LOGGER.error("Pan pose missing."); continue
             safe_lift_z = pan_pose_sim.z + 0.35
+            
+            # --- BEGIN SMOOTH LIFT CHANGE ---
             intermediate_lift_pos = grasp_pose.copy(); intermediate_lift_pos[2] += 0.20
-            LOGGER.info("Lifting straight up to %.3f m", intermediate_lift_pos[2])
-            if not self.controller.move_waypoint(intermediate_lift_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT): LOGGER.warning("Initial lift failed."); continue
-            LOGGER.info("Pausing after initial lift..."); sim.step_simulation(steps=120)
+            LOGGER.info("Lifting straight up smoothly to %.3f m", intermediate_lift_pos[2])
+            
+            # Interpolate the vertical lift over 25 steps instead of 1 waypoint
+            start_lift_pos = grasp_pose.copy()
+            LIFT_STEPS = 25
+            for i in range(LIFT_STEPS + 1):
+                alpha = i / LIFT_STEPS
+                # Linear interp z
+                curr_pos = (1.0 - alpha) * start_lift_pos + alpha * intermediate_lift_pos
+                # Shorter timeout per step
+                step_timeout = max(sim.dt * 10, NORMAL_TIMEOUT / LIFT_STEPS)
+                if not self.controller.move_waypoint(curr_pos, quat_grasp, timeout_s=step_timeout):
+                     LOGGER.warning("Smooth lift step %d failed", i)
+                     break
+            # --- END SMOOTH LIFT CHANGE ---
+
             safe_lift_pos = intermediate_lift_pos.copy(); safe_lift_pos[2] = safe_lift_z
             LOGGER.info("Lifting to safe height: %.3f m", safe_lift_z)
             self.controller.move_waypoint(safe_lift_pos, quat_grasp, timeout_s=LONG_TIMEOUT)
@@ -193,9 +208,11 @@ class PourBowlIntoPanAndReturn:
             pan_center_xy = np.array([pan_pose_sim.x, pan_pose_sim.y], dtype=float)
             pan_quat_xyzw = _pose_to_quaternion(pan_pose_sim)
             pan_R = np.array(p.getMatrixFromQuaternion(pan_quat_xyzw)).reshape(3, 3)
-            # --- CORRECTED OFFSET CALCULATION ---
-            # Pan local +X points along the handle. We want to move in the -X direction.
-            offset_dist = 0.20 # Offset 15cm from center, AWAY from handle
+            
+            # --- CORRECTED OFFSET CALCULATION (Shifted further) ---
+            # Increase magnitude to 0.22 (was 0.20 originally, 0.28 was too far)
+            # Assuming handle is at +X local, we go to -X local.
+            offset_dist = 0.22  
             offset_local = np.array([-offset_dist, 0.0, 0.0], dtype=float) # NEGATIVE X offset
             offset_world = pan_R @ offset_local
             above_pan_target_xy = pan_center_xy + offset_world[:2]
@@ -204,7 +221,7 @@ class PourBowlIntoPanAndReturn:
             # --- END CORRECTED OFFSET ---
 
             # 3a. Smooth horizontal move
-            HORIZONTAL_MOVE_STEPS = 25
+            HORIZONTAL_MOVE_STEPS = 15
             current_ls = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
             start_pos_horizontal = np.array(current_ls[0], dtype=float)
             LOGGER.info("Moving smoothly above pan cooking area (offset %.2f m) over %d steps...", offset_dist, HORIZONTAL_MOVE_STEPS)
