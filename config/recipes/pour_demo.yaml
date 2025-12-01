@@ -1,6 +1,6 @@
-bowl_pose: [0.25, 0.28, 0.75, 0.0, 0.0, 0.0]
+bowl_pose: [0.20, 0.35, 0.75, 0.0, 0.0, 0.0]
 # Moved pan closer: x reduced from 0.42 to 0.35
-pan_pose:  [0.35, 0.02, 0.75, 0.0, 0.0, -2.79]
+pan_pose:  [0.2, 0.02, 0.75, 0.0, 0.0, -2.79]
 # Updated pan_pour_pose to match new pan position (x=0.35)
 pan_pour_pose: [0.35, 0.02, 0.94, 3.1416, 0.0, 0.0]
 
@@ -38,7 +38,7 @@ perception:
 
 task:
   # Also update task-specific pose to match (x=0.35)
-  pan_pour_pose: [0.35, 0.02, 0.94, 3.1416, 0.0, 0.0]
+  pan_pour_pose: [0.3, 0.022, 0.94, 3.1416, 0.0, 0.0]
   tilt_angle_deg: 140
   hold_sec: 3.0
 

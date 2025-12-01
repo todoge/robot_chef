@@ -182,11 +182,10 @@ class PourBowlIntoPanAndReturn:
             if pan_pose_sim is None: LOGGER.error("Pan pose missing."); continue
             safe_lift_z = pan_pose_sim.z + 0.35
             
-            # --- BEGIN SMOOTH LIFT CHANGE ---
             intermediate_lift_pos = grasp_pose.copy(); intermediate_lift_pos[2] += 0.20
             LOGGER.info("Lifting straight up smoothly to %.3f m", intermediate_lift_pos[2])
             
-            # Interpolate the vertical lift over 25 steps instead of 1 waypoint
+            # Interpolate the vertical lift over 25 steps
             start_lift_pos = grasp_pose.copy()
             LIFT_STEPS = 25
             for i in range(LIFT_STEPS + 1):
@@ -198,7 +197,6 @@ class PourBowlIntoPanAndReturn:
                 if not self.controller.move_waypoint(curr_pos, quat_grasp, timeout_s=step_timeout):
                      LOGGER.warning("Smooth lift step %d failed", i)
                      break
-            # --- END SMOOTH LIFT CHANGE ---
 
             safe_lift_pos = intermediate_lift_pos.copy(); safe_lift_pos[2] = safe_lift_z
             LOGGER.info("Lifting to safe height: %.3f m", safe_lift_z)
@@ -209,16 +207,12 @@ class PourBowlIntoPanAndReturn:
             pan_quat_xyzw = _pose_to_quaternion(pan_pose_sim)
             pan_R = np.array(p.getMatrixFromQuaternion(pan_quat_xyzw)).reshape(3, 3)
             
-            # --- CORRECTED OFFSET CALCULATION (Shifted further) ---
-            # Increase magnitude to 0.22 (was 0.20 originally, 0.28 was too far)
-            # Assuming handle is at +X local, we go to -X local.
             offset_dist = 0.22  
             offset_local = np.array([-offset_dist, 0.0, 0.0], dtype=float) # NEGATIVE X offset
             offset_world = pan_R @ offset_local
             above_pan_target_xy = pan_center_xy + offset_world[:2]
             above_pan_target_pos = np.array([above_pan_target_xy[0], above_pan_target_xy[1], safe_lift_z], dtype=float)
             level_quat = quat_grasp
-            # --- END CORRECTED OFFSET ---
 
             # 3a. Smooth horizontal move
             HORIZONTAL_MOVE_STEPS = 15
@@ -283,14 +277,20 @@ class PourBowlIntoPanAndReturn:
                 self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
                 sim.step_simulation(steps=POUR_STEP_SIM_TIME)
 
-            # 5b. Lift back to safe height
+            # 5b. Lift back to safe height --- MODIFIED TO LIFT HIGHER BEFORE RETURN
             LOGGER.info("Lifting bowl back to safe height above pan.")
-            above_pan_safe_pos = pour_start_pos.copy(); above_pan_safe_pos[2] = safe_lift_z
+            above_pan_safe_pos = pour_start_pos.copy(); 
+            # Lift significantly higher to avoid pan rim/handle during return
+            above_pan_safe_pos[2] = safe_lift_z + 0.15 
             self.controller.move_waypoint(above_pan_safe_pos, level_quat, timeout_s=LONG_TIMEOUT)
 
             # 5c. Move horizontally back
             LOGGER.info("Moving smoothly back above bowl start position...")
-            back_target_pos = intermediate_lift_pos
+            # Target is the high lift position above the bowl start
+            back_target_pos = intermediate_lift_pos.copy()
+            # Ensure the target Z is also at the high safe height to avoid diagonal collision
+            back_target_pos[2] = above_pan_safe_pos[2]
+            
             current_ls_return = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
             start_pos_return = np.array(current_ls_return[0], dtype=float)
             for i in range(HORIZONTAL_MOVE_STEPS + 1):
@@ -300,14 +300,32 @@ class PourBowlIntoPanAndReturn:
                 if not self.controller.move_waypoint(inter_pos, level_quat, timeout_s=step_timeout): LOGGER.warning("Intermediate return move step %d failed.", i)
             LOGGER.info("Ensuring final return position above bowl.")
             self.controller.move_waypoint(back_target_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT)
+            
+            # Lower to intermediate lift pos
+            self.controller.move_waypoint(intermediate_lift_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT)
 
-            # 5d. Place bowl down
+            # 5d. Place bowl down --- MODIFIED TO BE SMOOTHER
             place_pose = grasp_pose.copy(); place_pose[2] += clearance + 0.05
-            LOGGER.info("Placing bowl back.")
-            self.controller.move_waypoint(place_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT)
+            LOGGER.info("Placing bowl back gently.")
+            
+            # Interpolate placement over 15 steps
+            current_ls_place = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
+            start_pos_place = np.array(current_ls_place[0], dtype=float)
+            PLACE_STEPS = 15
+            for i in range(PLACE_STEPS + 1):
+                alpha = i / PLACE_STEPS
+                inter_pos = (1.0 - alpha) * start_pos_place + alpha * place_pose
+                step_timeout = max(sim.dt * 10, NORMAL_TIMEOUT / PLACE_STEPS)
+                if not self.controller.move_waypoint(inter_pos, quat_grasp, timeout_s=step_timeout):
+                     LOGGER.warning("Smooth place step %d failed", i)
+                     break
 
             # 5e. Open gripper and retract
-            self.controller.open_gripper(); sim.step_simulation(steps=60)
+            self.controller.open_gripper(); 
+            LOGGER.info("Pausing after placement..."); 
+            sim.step_simulation(steps=60); 
+            time.sleep(2.0) # Added pause
+            
             LOGGER.info("Retracting arm.")
             retract_pos_1 = place_pose.copy(); retract_pos_1[2] = intermediate_lift_pos[2]
             self.controller.move_waypoint(retract_pos_1, quat_grasp, timeout_s=NORMAL_TIMEOUT)
