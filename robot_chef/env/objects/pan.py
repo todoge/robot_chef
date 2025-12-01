@@ -122,7 +122,7 @@ def create_pan(
     )
 
     body_id = p.createMultiBody(
-        baseMass=0.0,
+        baseMass=1.0,
         baseCollisionShapeIndex=collision,
         baseVisualShapeIndex=visual,
         basePosition=base_position,

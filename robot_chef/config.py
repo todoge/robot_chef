@@ -222,7 +222,7 @@ class MainConfig:
             bowl_pose=pose_from_list(data.get("bowl_pose")),
             pan_pose=pose_from_list(data.get("pan_pose")),
             spatula_stir_pose=pose_from_list(data.get("spatula_stir_pose")),
-            spatula_pose=pose_from_list(data.get("spatula_stir_pose")),
+            spatula_pose=pose_from_list(data.get("spatula_pose")),
             tilt_angle_deg=float(data.get("tilt_angle_deg")),
             hold_sec=float(data.get("hold_sec")),
             rice_particles=int(data.get("rice_particles")),

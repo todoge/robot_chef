@@ -34,6 +34,8 @@ class StirSimulator:
         self._setup_physics()
         self._spawn_objects()
         self._snap_objects_to_supports()
+        self._spawn_rice_particles()
+        self._spawn_egg_particles()
         self.open_grippers()
         self.step_simulation(steps=60)
         logger.info("Completed simulator setup")
@@ -109,7 +111,7 @@ class StirSimulator:
             controlMode=p.POSITION_CONTROL,
             targetPositions=list(target_pos),
             positionGains=[kp] * len(arm_state.joint_indices),
-            forces=[240.0] * len(arm_state.joint_indices),
+            forces=[20.0] * len(arm_state.joint_indices),
             physicsClientId=self.client_id,
         )
 
@@ -131,9 +133,102 @@ class StirSimulator:
             physicsClientId=self.client_id,
         )
 
+    def setup_debug_sliders(self, arm: str) -> dict[int, int]:
+        """Creates a slider for each revolute/prismatic joint of the specified arm."""
+        arm_state = self.get_arm(arm)
+        body_id = arm_state.body_id
+        slider_ids = {}
+        
+        # Iterate through all joints of the robot
+        for j in range(p.getNumJoints(body_id, self.client_id)):
+            info = p.getJointInfo(body_id, j, self.client_id)
+            joint_name = info[1].decode('utf-8')
+            joint_type = info[2]
+            
+            # Only add sliders for active joints (revolute or prismatic)
+            if joint_type in (p.JOINT_REVOLUTE, p.JOINT_PRISMATIC):
+                # Check for invalid limits (PyBullet returns 0.0 for fixed joints, which we skip)
+                lower_limit = info[8]
+                upper_limit = info[9]
+                if lower_limit == 0.0 and upper_limit == 0.0:
+                     continue
+                     
+                # Get the current joint position for the starting value
+                current_joint_state = p.getJointState(body_id, j, self.client_id)
+                initial_value = current_joint_state[0]
+
+                # Create the slider
+                slider_id = p.addUserDebugParameter(
+                    paramName=f"[{arm}] {joint_name}",
+                    rangeMin=lower_limit,
+                    rangeMax=upper_limit,
+                    startValue=initial_value,
+                    physicsClientId=self.client_id
+                )
+                # Store the PyBullet ID of the slider mapped to the joint ID
+                slider_ids[j] = slider_id
+                
+        return slider_ids
+
+    def interactive_mode_loop(self, arm: str, slider_ids: dict[int, int]):
+        """Reads joint values from sliders and moves the arm continuously."""
+        
+        joint_indices = list(slider_ids.keys())
+        arm_state = self.get_arm(arm)
+        
+        # Continuously run the interactive mode until the GUI is closed
+        while True:
+            # Check if GUI is still connected (to allow clean exit)
+            if not self.gui or not p.isConnected(self.client_id):
+                break
+                
+            target_positions = []
+            for joint_id in joint_indices:
+                slider_id = slider_ids[joint_id]
+                # Read the current value from the GUI slider
+                target_pos = p.readUserDebugParameter(slider_id, self.client_id)
+                target_positions.append(target_pos)
+                
+            # Apply the positions to the joints using position control
+            p.setJointMotorControlArray(
+                bodyUniqueId=arm_state.body_id,
+                jointIndices=joint_indices,
+                controlMode=p.POSITION_CONTROL,
+                targetPositions=target_positions,
+                forces=[240.0] * len(joint_indices), # Use same force as set_joint_positions
+                physicsClientId=self.client_id
+            )
+
+            # Step the simulation forward
+            self.step_simulation(steps=1)
+            # A small delay helps the GUI remain responsive
+            p.stepSimulation(self.client_id) # Call p.stepSimulation one last time
+
     def disconnect(self) -> None:
         if p.isConnected(self.client_id):
             p.disconnect(self.client_id)
+
+    def count_particles_in_pan(self) -> dict[str, float]:
+        pan_entry = self.objects.get("pan")
+        pan_id = pan_entry["body_id"]
+        center, _ = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.client_id)
+        props = pan_entry["properties"]
+        return {
+            "rice": self._rice_particles.count_in_pan(
+                client_id=self.client_id,
+                center=center,
+                inner_radius=float(props["inner_radius"]),
+                base_height=float(props["base_height"]),
+                lip_height=float(props["lip_height"]),
+            ),
+            "egg": self._egg_particles.count_in_pan(
+                client_id=self.client_id,
+                center=center,
+                inner_radius=float(props["inner_radius"]),
+                base_height=float(props["base_height"]),
+                lip_height=float(props["lip_height"]),
+            ),
+        }
 
     # endregion : Public APIs
 
@@ -143,14 +238,12 @@ class StirSimulator:
         self.objects: dict[str, dict[str, object]] = {}
         self._spawn_plane()
         self._spawn_table()
-        self._spawn_bowl()
+        # self._spawn_bowl()
         self._spawn_pan()
         self._spawn_stove()
         self._spawn_spatula()
         self._spawn_pedestals()
         self._spawn_panda_arms()
-        self._spawn_rice_particles()
-        self._spawn_egg_particles()
 
     def _spawn_plane(self) -> None:
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
@@ -224,9 +317,11 @@ class StirSimulator:
 
     def _spawn_spatula(self) -> None:
         spatula_id = p.loadSDF(
-            "robot_chef/env/spatula/model.sdf",
+            "C:/w/robot_chef/robot_chef/env/spatula/model.sdf",
+            # "robot_chef/env/spatula/model.sdf",
             physicsClientId=self.client_id,
         )[0]
+        logger.info(f"SPATULA_INIT_POSE={self.cfg.spatula_pose}")
         base_orientation = p.getQuaternionFromEuler(
             self.cfg.spatula_pose.orientation_rpy
         )
@@ -311,6 +406,7 @@ class StirSimulator:
                 yaw - math.pi / 2.0,
             ),
         )
+        self.arm = {"left": self.left_arm, "right": self.right_arm}
         self.objects["left_arm"] = {"body_id": self.left_arm.body_id}
         self.objects["right_arm"] = {"body_id": self.right_arm.body_id}
 
@@ -379,19 +475,15 @@ class StirSimulator:
     # region : Internal Pose Utils
 
     def _snap_objects_to_supports(self) -> None:
-        # get support tops
         table_top = self._get_body_top_z("table")
         stove_top = self._get_body_top_z("stove")
-        # snap items on supports
         self._place_on_support("stove", support_top_z=table_top)
-        self._place_on_support("bowl", support_top_z=table_top)
+        # self._place_on_support("bowl", support_top_z=table_top)
         self._place_on_support("spatula", support_top_z=table_top)
-
 
         stove_top = self._get_body_top_z("stove")
         self._place_on_support("pan", support_top_z=stove_top)
 
-        # update states
         pan_bottom = self._get_body_bottom_z("pan")
         self.objects["pan"]["properties"]["base_height"] = pan_bottom
 

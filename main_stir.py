@@ -13,7 +13,8 @@ from robot_chef.tasks.stir import TaskStir
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Robot Chef")
-    ap.add_argument("--config", required=True, help="Path to YAML config")
+    # ap.add_argument("--config", required=True, help="Path to YAML config")
+    ap.add_argument("--config", help="Path to YAML config", default="config/recipes/stir.yml")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     return ap.parse_args()
@@ -24,6 +25,7 @@ def main():
 
     cfg = config.load_main_config(Path(args.config))
     sim = StirSimulator(gui=not args.headless, cfg=cfg)
+    # sim = StirSimulator(gui=False, cfg=cfg)
     task = TaskStir()
 
     try:

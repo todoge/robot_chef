@@ -17,3 +17,9 @@ def apply_world_yaw(pose: Pose6D, world_yaw_deg: float) -> Pose6D:
         pitch=pose.pitch,
         yaw=pose.yaw + yaw,
     )
+
+def pause() -> None:
+    print("▌▌ PAUSE ▌▌")
+    input()
+    print("🞂 RESUME 🞂")
+    
