@@ -11,14 +11,14 @@ import numpy as np
 
 from ..config import PourTaskConfig, Pose6D
 from ..simulation import RobotChefSimulation # Explicit import for type checking
-from ..env.objects import create_specula
+from ..env.objects import create_spatula
 
 LOGGER = logging.getLogger(__name__)
 
 class UnderArmReachingTask:
     """
     Scenario:
-    1. Left Arm: Holds a specula and hovers rigidly over the table (Obstacle).
+    1. Left Arm: Holds a spatula and hovers rigidly over the table (Obstacle).
     2. Target: A bowl placed underneath/behind the Left Arm's bridge.
     3. Task: Right Arm navigates from Start -> Bowl (Phase 1), then Bowl -> Pan (Phase 2).
     """
@@ -38,9 +38,9 @@ class UnderArmReachingTask:
         sim.set_joint_positions(safe_right_joints, arm="right")
         sim.step_simulation(20)
 
-        # 1. Spawn Specula
-        specula_pose = Pose6D(0.0, 0.0, 0.5, 0, 0, 0) 
-        self.specula_id, _ = create_specula(sim.client_id, specula_pose)
+        # 1. Spawn spatula
+        spatula_pose = Pose6D(0.0, 0.0, 0.5, 0, 0, 0) 
+        self.spatula_id, _ = create_spatula(sim.client_id, spatula_pose)
         
         # 2. Setup Left Arm (The Obstacle)
         left_arm = sim.left_arm
@@ -52,18 +52,18 @@ class UnderArmReachingTask:
         sim.set_joint_positions(blocking_joints, arm="left")
         sim.step_simulation(50) 
         
-        # 3. Attach Specula to Left Hand
+        # 3. Attach spatula to Left Hand
         ls = p.getLinkState(left_arm.body_id, left_arm.ee_link, physicsClientId=sim.client_id)
         eef_pos = ls[4]
         eef_orn = ls[5]
         
-        p.resetBasePositionAndOrientation(self.specula_id, eef_pos, eef_orn, physicsClientId=sim.client_id)
+        p.resetBasePositionAndOrientation(self.spatula_id, eef_pos, eef_orn, physicsClientId=sim.client_id)
         
         # Create Constraint (Rigid Lock)
         p.createConstraint(
             parentBodyUniqueId=left_arm.body_id,
             parentLinkIndex=left_arm.ee_link,
-            childBodyUniqueId=self.specula_id,
+            childBodyUniqueId=self.spatula_id,
             childLinkIndex=-1,
             jointType=p.JOINT_FIXED,
             jointAxis=[0, 0, 0],
@@ -77,7 +77,7 @@ class UnderArmReachingTask:
         sim.gripper_close(arm="left")
         sim.step_simulation(50)
 
-        LOGGER.info("Waiting for specula to render...")
+        LOGGER.info("Waiting for spatula to render...")
         for _ in range(20):
             sim.step_simulation(1)
             time.sleep(0.05)
@@ -86,7 +86,7 @@ class UnderArmReachingTask:
              LOGGER.info("Spawning particles manually...")
              sim.spawn_rice_particles(20, radius=0.01, seed=cfg.seed)
         
-        LOGGER.info("Scenario Setup: Left Arm is holding specula in blocking pose.")
+        LOGGER.info("Scenario Setup: Left Arm is holding spatula in blocking pose.")
 
     def plan(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
         LOGGER.info("Planning phase: The environment is static. The Left Arm is the obstacle.")
@@ -419,7 +419,7 @@ class UnderArmReachingTask:
                 LOGGER.debug(f"Collision detected with Body ID {body_b} ({body_name})")
             return True
 
-        obstacles = [sim.left_arm.body_id, self.specula_id]
+        obstacles = [sim.left_arm.body_id, self.spatula_id]
         
         for obs_id in obstacles:
             closest = p.getClosestPoints(

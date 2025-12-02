@@ -2,6 +2,6 @@
 
 from .pan import create_pan
 from .rice_bowl import create_rice_bowl
-from .specula import create_specula
+from .spatula import create_spatula
 
-__all__ = ["create_rice_bowl", "create_pan", "create_specula"]
+__all__ = ["create_rice_bowl", "create_pan", "create_spatula"]

@@ -1,4 +1,4 @@
-"""Factory for spawning a kitchen specula (spatula)."""
+"""Factory for spawning a kitchen spatula (spatula)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pybullet as p
 from ... import config
 
 
-def create_specula(
+def create_spatula(
     client_id: int,
     pose: config.Pose6D,
     handle_length: float = 0.15,
@@ -19,7 +19,7 @@ def create_specula(
     blade_thickness: float = 0.005,
     mass: float = 0.2,
 ) -> Tuple[int, Dict[str, float]]:
-    """Spawn a specula/spatula."""
+    """Spawn a spatula/spatula."""
     orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
     base_position = (pose.x, pose.y, pose.z)
 
