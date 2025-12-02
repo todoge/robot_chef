@@ -108,6 +108,16 @@ class PourBowlIntoPanAndReturn:
             resolution=view_cfg.resolution,
             noise=CameraNoiseModel(depth_std=noise_cfg.depth_std, drop_prob=noise_cfg.drop_prob),
         )
+        
+        # Mount camera to the Right Arm End-Effector for IBVS eye-in-hand demo
+        # Positions camera 5cm "above" (z) and 5cm "forward" (x) of the wrist, looking down (-y)
+        self.camera.mount_to_link(
+            parent_body_id=sim.right_arm.body_id,
+            parent_link_id=sim.right_arm.ee_link,
+            rel_xyz=[0.05, 0.0, 0.05],
+            rel_rpy_deg=[0.0, -90.0, 0.0]
+        )
+
         self.controller = VisionRefineController(
             client_id=sim.client_id,
             arm_id=sim.right_arm.body_id,
@@ -117,6 +127,7 @@ class PourBowlIntoPanAndReturn:
             camera=self.camera,
             gripper_open=lambda width=0.08: sim.gripper_open(width=width),
             gripper_close=lambda force=60.0: sim.gripper_close(force=force),
+            camera_fixed=False  # Eye-in-hand setup: camera moves with robot
         )
         sim.gripper_open()
         if cfg.particles > 0:
@@ -147,8 +158,18 @@ class PourBowlIntoPanAndReturn:
         if not self.camera or not self.controller:
             raise RuntimeError("Task not set up")
         bowl_entry = sim.objects["bowl"]
-        bowl_pose: Pose6D = bowl_entry["pose"]
-        self.camera.aim_at(bowl_pose.position, distance=1.1, height_delta=0.25)
+        
+        # --- INITIAL LOOK MOTION ---
+        # Move the arm to a "Look" pose above the expected bowl position
+        # This is critical for Eye-in-Hand so the camera sees the target initially.
+        bowl_pose_initial: Pose6D = bowl_entry["pose"]
+        look_pos = [bowl_pose_initial.x, bowl_pose_initial.y, bowl_pose_initial.z + 0.45]
+        # Look straight down (approximate)
+        look_quat = p.getQuaternionFromEuler([math.pi, 0, 0]) 
+        
+        LOGGER.info("Moving to initial observation pose...")
+        self.controller.move_waypoint(look_pos, look_quat, max_steps=180)
+        # ---------------------------
 
         detection = self._run_perception(cfg, sim, bowl_entry)
         if detection is None:
@@ -177,6 +198,8 @@ class PourBowlIntoPanAndReturn:
         last_error: Optional[str] = None
         while attempt < 3:
             attempt += 1
+            
+            # Camera captures from current wrist pose
             rgb, depth, K = self.camera.get_rgbd()
             depth_valid = depth[depth > 0.0]
             depth_range = (
@@ -262,6 +285,7 @@ class PourBowlIntoPanAndReturn:
             finger_links = sim.right_arm.finger_joints
 
             def get_features():
+                # No manual aiming; camera is mounted and moves with arm
                 rgb, depth, K = self.camera.get_rgbd()
                 det = detect_bowl_rim(
                     rgb=rgb,
