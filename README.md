@@ -4,7 +4,6 @@ Welcome to our repository on chef robot project. Please explore the following br
 
 | Branch | Description |
 | --- | --- |
-| path-planning | Pouring Task with Path Planning |
-| top-down | Pouring Task with IBVS |
+| path-planning | Pouring Task with IBVS / Path Planning |
 | stir | Stirring Task (Basic) |
 | ggcn | GGCN + RL Exploration |
