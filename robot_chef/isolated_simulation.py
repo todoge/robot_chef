@@ -25,7 +25,7 @@ from .camera import Camera
 
 from .tasks.detect_object import Object_Detector
 from .tasks.predict_grasp import Grasp_Predictor
-from .gqcnn import get_gqcnn
+# from .gqcnn import get_gqcnn
 
 from .config import Pose6D, PourTaskConfig
 from .env.objects import pan as pan_factory
@@ -118,7 +118,7 @@ class RobotChefSimulation:
         self.IMG_HEIGHT = 224
         self.obj_detector = Object_Detector((self.IMG_WIDTH, self.IMG_HEIGHT))
         self.grasping_predictor = Grasp_Predictor()
-        self.gqcnn = get_gqcnn()
+        # self.gqcnn = get_gqcnn()
         self.camera = None
         self.keyposes = None
         

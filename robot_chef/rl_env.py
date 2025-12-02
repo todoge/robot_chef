@@ -417,7 +417,7 @@ class RobotChefSimulation(gym.Env):
         time.sleep(1./240.)  # Sleep for one simulation timestep (default 240 Hz)
     
     def close(self):
-        p.disconnect(self.physics_client)
+        p.disconnect(self.client_id)
 
     # ---------- Mounts / pedestals with clearance ---------- #
 
