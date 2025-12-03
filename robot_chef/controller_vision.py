@@ -82,17 +82,11 @@ class VisionRefineController:
         if len(self._arm_dof_cols) != len(self.arm_joints):
             LOGGER.warning("Some arm joints are not movable or not found in DoF map; IBVS may be ill-posed.")
 
-    # ------------------------------------------------------------------ #
-    # Gripper helpers
-
     def open_gripper(self, width: float = 0.08) -> None:
         self._open(width)
 
     def close_gripper(self, force: float = 60.0) -> None:
         self._close(force)
-
-    # ------------------------------------------------------------------ #
-    # Waypoint motion
 
     def move_waypoint(self, pos: Sequence[float], quat_xyzw: Sequence[float], timeout_s: float = 3.0) -> bool:
         """Moves to a target pose using PyBullet's internal controller."""
@@ -124,24 +118,21 @@ class VisionRefineController:
 
         target = [float(full_ik[j]) for j in self.arm_joints]
         t0 = time.time()
-        # The internal loop handles the motion over time
         while time.time() - t0 < timeout_s:
             p.setJointMotorControlArray(
                 self.arm_id,
                 self.arm_joints,
                 p.POSITION_CONTROL,
                 target,
-                positionGains=[0.08] * len(self.arm_joints), # Standard gain
+                positionGains=[0.08] * len(self.arm_joints),
                 forces=[200.0] * len(self.arm_joints),
                 physicsClientId=self.client_id,
             )
-            p.stepSimulation(physicsClientId=self.client_id) # Step sim inside loop
-
-            # Optional: Add an early exit condition if target is reached
+            p.stepSimulation(physicsClientId=self.client_id)
             current_q, _ = self._get_arm_joint_states()
-            if np.linalg.norm(np.array(target) - current_q) < 0.01: # Check if close enough
+            if np.linalg.norm(np.array(target) - current_q) < 0.01:
                  break
-        return True # Return true even if timeout reached, assume it got close
+        return True
 
     def get_ik_for_pose(
         self, pos: Sequence[float], quat_xyzw: Sequence[float]
@@ -173,11 +164,6 @@ class VisionRefineController:
             LOGGER.error("IK failed: %s", exc)
             return None
 
-    # --- REMOVED move_to_joint_target ---
-
-    # ------------------------------------------------------------------ #
-    # IBVS refinement (Unused in this setup, kept for potential future use)
-
     def refine_to_features_ibvs(
         self,
         *,
@@ -190,12 +176,8 @@ class VisionRefineController:
         gain: float = 0.35,
         max_joint_vel: float = 0.5,
     ) -> bool:
-        # ... (IBVS code remains here but won't be called) ...
         LOGGER.warning("IBVS called but likely not intended for fixed camera setup.")
-        return True # Return true to avoid breaking sequence if called accidentally
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
+        return True 
 
     def move_to_joint_target(
             self, q_target: np.ndarray, gain: float = 0.08
@@ -207,23 +189,21 @@ class VisionRefineController:
                 self.arm_joints,
                 p.POSITION_CONTROL,
                 target_list,
-                positionGains=[gain] * len(self.arm_joints), # Use the provided gain
+                positionGains=[gain] * len(self.arm_joints),
                 forces=[200.0] * len(self.arm_joints),
                 physicsClientId=self.client_id,
             )
     def _get_joint_info(self) -> Tuple[List[float], List[float], List[float], List[float]]:
         """Gets limits, ranges, and rest poses for IK calculation."""
         ll, ul, jr, rp = [], [], [], []
-        # Get info for all movable joints, needed for full IK solution
         num_joints = p.getNumJoints(self.arm_id, physicsClientId=self.client_id)
         for i in range(num_joints):
              joint_info = p.getJointInfo(self.arm_id, i, physicsClientId=self.client_id)
              q_index = joint_info[3]
-             if q_index > -1: # It's a movable joint
+             if q_index > -1:
                   ll.append(joint_info[8])
                   ul.append(joint_info[9])
                   jr.append(joint_info[9] - joint_info[8])
-                  # Simple midpoint rest pose
                   rp.append((joint_info[8] + joint_info[9]) / 2)
         return ll, ul, jr, rp
 

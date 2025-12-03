@@ -14,10 +14,9 @@ def parse_args():
 def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    # Defer imports so the agent can regenerate these modules:
     from robot_chef.tasks.pour_bowl_into_pan import PourBowlIntoPanAndReturn
-    from robot_chef import config  # agent will create
-    from robot_chef.simulation import RobotChefSimulation  # agent will create
+    from robot_chef import config
+    from robot_chef.simulation import RobotChefSimulation
 
     cfg = config.load_pour_task_config(Path(args.config))
     sim = RobotChefSimulation(gui=not args.headless, recipe=cfg)

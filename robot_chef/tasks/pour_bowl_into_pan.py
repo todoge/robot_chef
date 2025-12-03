@@ -6,7 +6,6 @@ import logging
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-import time # For pauses
 
 import numpy as np
 import pybullet as p
@@ -15,16 +14,13 @@ import zlib
 
 from ..camera import Camera, CameraNoiseModel
 from ..config import Pose6D, PourTaskConfig
-from ..controller_vision import VisionRefineController # Keep using this for IK and moves
+from ..controller_vision import VisionRefineController
 from ..perception.bowl_rim import detect_bowl_rim
 from ..simulation import RobotChefSimulation
 
 LOGGER = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Small geometry helpers (Unchanged)
-# ... (Assume _matrix_to_quaternion, _write_png, _pose_to_quaternion, _apply_world_yaw are correct) ...
 def _matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, float]:
     m = R
     trace = float(m[0, 0] + m[1, 1] + m[2, 2])
@@ -85,7 +81,6 @@ class PourBowlIntoPanAndReturn:
         self._pan_uid: Optional[int] = None
         self._metrics: Dict[str, float] = {"transfer_ratio": 0.0, "in_pan": 0, "total": 0}
 
-    # --- Lifecycle (Unchanged) ---
     def setup(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> None:
         self.sim = sim; self.cfg = cfg
         view_cfg = cfg.camera.get_active_view(); noise_cfg = cfg.camera.noise
@@ -115,7 +110,6 @@ class PourBowlIntoPanAndReturn:
     def metrics(self, sim: RobotChefSimulation) -> Dict[str, float]:
         return dict(self._metrics)
 
-    # --- Perception (Unchanged) ---
     def _run_perception( self, sim: RobotChefSimulation, cfg: PourTaskConfig, bowl_entry: Dict[str, object],) -> Optional[Dict[str, object]]:
         assert self.camera is not None and self.controller is not None
         bowl_pose: Pose6D = bowl_entry["pose"]
@@ -139,7 +133,6 @@ class PourBowlIntoPanAndReturn:
         LOGGER.info("Saved detection overlay to %s", out_path.absolute()); LOGGER.info("Detected rim.")
         return detection
 
-    # --- Execution ---
     def _perform_pour_sequence(
         self, sim: RobotChefSimulation, cfg: PourTaskConfig, detection: Dict[str, object],
     ) -> bool:
@@ -150,18 +143,17 @@ class PourBowlIntoPanAndReturn:
         if not candidates: LOGGER.error("No grasp candidates."); return False
 
         MIN_GRASP_WIDTH = 0.005
-        LONG_TIMEOUT = 12.0 # Increased slightly again
-        NORMAL_TIMEOUT = 9.0 # Increased slightly again
+        LONG_TIMEOUT = 12.0
+        NORMAL_TIMEOUT = 9.0
 
-        POUR_STEPS = 150 # Even more steps
-        TOTAL_POUR_TIME_S = 8.0 # Pour over 10 seconds
+        POUR_STEPS = 150
+        TOTAL_POUR_TIME_S = 8.0
         POUR_STEP_SIM_TIME = max(1, int( (TOTAL_POUR_TIME_S / POUR_STEPS) / sim.dt ))
-        POUR_STEP_GAIN = 0.015 # Very low gain
+        POUR_STEP_GAIN = 0.015
 
 
         for idx, candidate in enumerate(candidates[:3]):
             LOGGER.info("Attempting grasp candidate %d", idx + 1)
-            # === Step 1: Grip the rim === (Unchanged logic)
             position = np.array(candidate["pose_world"]["position"], dtype=float)
             quat_grasp = np.array(candidate["pose_world"]["quaternion"], dtype=float)
             clearance = cfg.perception.grasp_clearance_m
@@ -177,7 +169,6 @@ class PourBowlIntoPanAndReturn:
             if current_width < MIN_GRASP_WIDTH: LOGGER.warning("Grasp FAILED (%.4f < %.4f). Retrying.", current_width, MIN_GRASP_WIDTH); self.controller.open_gripper(); self.controller.move_waypoint(pregrasp_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT); continue
             LOGGER.info("Grasp SUCCEEDED (%.4f).", current_width)
 
-            # === Step 2: Lift the bowl === (Unchanged logic)
             pan_pose_sim: Pose6D = sim.objects["pan"]["pose"]
             if pan_pose_sim is None: LOGGER.error("Pan pose missing."); continue
             safe_lift_z = pan_pose_sim.z + 0.35
@@ -189,21 +180,16 @@ class PourBowlIntoPanAndReturn:
             LOGGER.info("Lifting to safe height: %.3f m", safe_lift_z)
             self.controller.move_waypoint(safe_lift_pos, quat_grasp, timeout_s=LONG_TIMEOUT)
 
-            # === Step 3: Move above the pan (No rotation, Corrected XY) ===
             pan_center_xy = np.array([pan_pose_sim.x, pan_pose_sim.y], dtype=float)
             pan_quat_xyzw = _pose_to_quaternion(pan_pose_sim)
             pan_R = np.array(p.getMatrixFromQuaternion(pan_quat_xyzw)).reshape(3, 3)
-            # --- CORRECTED OFFSET CALCULATION ---
-            # Pan local +X points along the handle. We want to move in the -X direction.
-            offset_dist = 0.20 # Offset 15cm from center, AWAY from handle
-            offset_local = np.array([-offset_dist, 0.0, 0.0], dtype=float) # NEGATIVE X offset
+            offset_dist = 0.20
+            offset_local = np.array([-offset_dist, 0.0, 0.0], dtype=float)
             offset_world = pan_R @ offset_local
             above_pan_target_xy = pan_center_xy + offset_world[:2]
             above_pan_target_pos = np.array([above_pan_target_xy[0], above_pan_target_xy[1], safe_lift_z], dtype=float)
             level_quat = quat_grasp
-            # --- END CORRECTED OFFSET ---
 
-            # 3a. Smooth horizontal move
             HORIZONTAL_MOVE_STEPS = 25
             current_ls = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
             start_pos_horizontal = np.array(current_ls[0], dtype=float)
@@ -216,7 +202,6 @@ class PourBowlIntoPanAndReturn:
             LOGGER.info("Ensuring final horizontal position above pan cooking area.")
             self.controller.move_waypoint(above_pan_target_pos, level_quat, timeout_s=NORMAL_TIMEOUT)
 
-            # 3b. Define Pour Start Pose
             pan_props = sim.objects["pan"]["properties"]
             pan_rim_height = pan_pose_sim.z + pan_props.get("depth", 0.045)
             pour_start_z = pan_rim_height + 0.25 # Start pour high
@@ -227,51 +212,41 @@ class PourBowlIntoPanAndReturn:
             if not self.controller.move_waypoint(pour_start_pos, pour_start_quat, timeout_s=LONG_TIMEOUT):
                  LOGGER.warning("Move to pour start pose failed."); continue
 
-
-            # === Step 4: Perform the pour slowly (using joint interpolation) ===
             tilt_rad = math.radians(cfg.tilt_angle_deg)
             current_orn_matrix = np.array(p.getMatrixFromQuaternion(pour_start_quat)).reshape(3, 3)
             cy, sy = math.cos(tilt_rad), math.sin(tilt_rad)
             R_pitch_local = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=float)
             pour_orn_matrix = current_orn_matrix @ R_pitch_local
             pour_quat_target = _matrix_to_quaternion(pour_orn_matrix)
-            # Pour target position keeps the same XY, drops Z slightly but stays high
             pour_pos_target = pour_start_pos.copy()
-            pour_pos_target[2] = max(pan_rim_height + 0.15, pour_start_pos[2] - 0.03) # End pour >= 15cm above rim
+            pour_pos_target[2] = max(pan_rim_height + 0.15, pour_start_pos[2] - 0.03)
 
-            # Get IK for start and end
             q_start_pour = self.controller.get_ik_for_pose(pour_start_pos, pour_start_quat)
             q_end_pour = self.controller.get_ik_for_pose(pour_pos_target, pour_quat_target)
             if q_start_pour is None or q_end_pour is None:
                 LOGGER.error("Failed to get IK for pour motion. Aborting."); continue
 
-            # --- GENTLE POUR LOOP ---
             LOGGER.info("Executing gentle pour rotation over %d steps...", POUR_STEPS)
             for i in range(POUR_STEPS + 1):
                 alpha = i / POUR_STEPS
                 q_current = (1.0 - alpha) * q_start_pour + alpha * q_end_pour
                 self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
                 sim.step_simulation(steps=POUR_STEP_SIM_TIME)
-            # --- END GENTLE POUR LOOP ---
 
             LOGGER.info("Holding pour..."); hold_steps = max(1, int(cfg.hold_sec / sim.dt));
             for _ in range(hold_steps): sim.step_simulation(steps=1)
 
-            # === Step 5: Put the bowl back ===
-            # 5a. Rotate back slowly to level pose (reverse loop)
             LOGGER.info("Returning SLOWLY bowl to level pose...")
             for i in range(POUR_STEPS + 1):
-                alpha = (POUR_STEPS - i) / POUR_STEPS # Reverse alpha
+                alpha = (POUR_STEPS - i) / POUR_STEPS
                 q_current = (1.0 - alpha) * q_start_pour + alpha * q_end_pour
                 self.controller.move_to_joint_target(q_current, gain=POUR_STEP_GAIN)
                 sim.step_simulation(steps=POUR_STEP_SIM_TIME)
 
-            # 5b. Lift back to safe height
             LOGGER.info("Lifting bowl back to safe height above pan.")
             above_pan_safe_pos = pour_start_pos.copy(); above_pan_safe_pos[2] = safe_lift_z
             self.controller.move_waypoint(above_pan_safe_pos, level_quat, timeout_s=LONG_TIMEOUT)
 
-            # 5c. Move horizontally back
             LOGGER.info("Moving smoothly back above bowl start position...")
             back_target_pos = intermediate_lift_pos
             current_ls_return = p.getLinkState(self.controller.arm_id, self.controller.ee_link, physicsClientId=sim.client_id)
@@ -284,12 +259,10 @@ class PourBowlIntoPanAndReturn:
             LOGGER.info("Ensuring final return position above bowl.")
             self.controller.move_waypoint(back_target_pos, quat_grasp, timeout_s=NORMAL_TIMEOUT)
 
-            # 5d. Place bowl down
             place_pose = grasp_pose.copy(); place_pose[2] += clearance + 0.05
             LOGGER.info("Placing bowl back.")
             self.controller.move_waypoint(place_pose, quat_grasp, timeout_s=NORMAL_TIMEOUT)
 
-            # 5e. Open gripper and retract
             self.controller.open_gripper(); sim.step_simulation(steps=60)
             LOGGER.info("Retracting arm.")
             retract_pos_1 = place_pose.copy(); retract_pos_1[2] = intermediate_lift_pos[2]
@@ -299,7 +272,6 @@ class PourBowlIntoPanAndReturn:
 
             LOGGER.info("Grasp and pour sequence successful."); return True # Success!
 
-        # If loop finishes, all candidates failed
         LOGGER.error("All grasp candidates failed."); return False
 
 __all__ = ["PourBowlIntoPanAndReturn"]

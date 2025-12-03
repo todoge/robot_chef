@@ -17,9 +17,7 @@ def create_rice_bowl(
     wall_thickness: float = 0.008,
     base_thickness: float = 0.006,
     mass: float = 0.3,
-    # --- INCREASED DEFAULT FRICTION ---
-    friction: float = 1.5, # Increased from 0.8
-    # --- END FRICTION ---
+    friction: float = 1.5,
 ) -> Tuple[int, Dict[str, float]]:
     """Spawn a compound rice bowl that can contain particles."""
     orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
@@ -28,8 +26,8 @@ def create_rice_bowl(
     wall_height = inner_height
 
     shape_types = [
-        p.GEOM_BOX, # Base box
-        p.GEOM_BOX, p.GEOM_BOX, p.GEOM_BOX, p.GEOM_BOX, # Walls
+        p.GEOM_BOX,
+        p.GEOM_BOX, p.GEOM_BOX, p.GEOM_BOX, p.GEOM_BOX,
     ]
     radii = [0.0] * 5
     lengths = [0.0] * 5

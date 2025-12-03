@@ -111,9 +111,6 @@ class Camera:
 
         self._update_from_free_pose()
 
-    # ------------------------------------------------------------------ #
-    # Mounting / configuration
-
     def mount_to_link(
         self,
         *,
@@ -225,9 +222,6 @@ class Camera:
 
         return rgb, depth.astype(np.float32), self._intrinsics.copy(), seg_mask
 
-    # ------------------------------------------------------------------ #
-    # Accessors
-
     @property
     def intrinsics(self) -> np.ndarray:
         return self._intrinsics.copy()
@@ -248,9 +242,6 @@ class Camera:
         pos = self._T_world_cam_gl[:3, 3].copy()
         quat = _quaternion_from_matrix(self._T_world_cam_gl[:3, :3])
         return pos, np.asarray(quat, dtype=float)
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
 
     def _update_free_orientation(self, target_xyz: Sequence[float]) -> None:
         eye = self._world_position
@@ -292,7 +283,6 @@ class Camera:
         self._update_cv_frames()
 
     def _update_cv_frames(self) -> None:
-        # Convert OpenGL camera frame (x right, y up, z forward) to CV convention (x right, y down, z forward)
         T_gl_to_cv = np.eye(4, dtype=float)
         T_gl_to_cv[1, 1] = -1.0
         T_cv_to_gl = T_gl_to_cv
