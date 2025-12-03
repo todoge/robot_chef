@@ -85,7 +85,6 @@ def detect_bowl_rim(
     inner_height = float(bowl_props.get("inner_height", 0.05))
     rim_height_world = bowl_pos[2] + inner_height
 
-    # Estimate bounding box by projecting analytic rim samples.
     angles = np.linspace(0.0, 2.0 * math.pi, num=64, endpoint=False)
     rim_samples_local = np.stack(
         [
@@ -141,7 +140,6 @@ def detect_bowl_rim(
         else:
             points_world = filtered
 
-    # Ensure dense sampling >= 200 points by interpolation along the rim.
     if points_world.shape[0] < 200:
         extra_angles = np.linspace(0.0, 2.0 * math.pi, num=200, endpoint=False)
         dense_samples = (bowl_rot @ np.stack(
@@ -154,7 +152,6 @@ def detect_bowl_rim(
         ).T).T + bowl_pos
         points_world = np.concatenate([points_world, dense_samples], axis=0)
 
-    # Fit circle in XY plane.
     xy = points_world[:, :2]
     A = np.column_stack([2.0 * xy[:, 0], 2.0 * xy[:, 1], np.ones(xy.shape[0])])
     b_vec = np.sum(xy ** 2, axis=1)
@@ -163,7 +160,6 @@ def detect_bowl_rim(
     radius_est = math.sqrt(max(cx * cx + cy * cy + c, 1e-6))
     center_world = np.array([cx, cy, rim_height_world], dtype=float)
 
-    # Produce rim points evenly along the circle for downstream use.
     dense_angles = np.linspace(0.0, 2.0 * math.pi, num=360, endpoint=False)
     rim_pts_3d = np.stack(
         [
@@ -205,7 +201,6 @@ def detect_bowl_rim(
             }
         )
 
-    # Determine features for IBVS as opposite rim points.
     basis_angles = [0.0, math.pi]
     uv_pair: List[Tuple[float, float]] = []
     Z_pair: List[float] = []
