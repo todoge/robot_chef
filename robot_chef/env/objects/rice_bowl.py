@@ -32,11 +32,11 @@ def create_rice_bowl(
     radii = [0.0] * 5
     lengths = [0.0] * 5
     half_extents = [
-        [radius, radius, base_thickness / 2.0], # Base
-        [wall_thickness / 2.0, inner_radius, wall_height / 2.0], # Side
-        [wall_thickness / 2.0, inner_radius, wall_height / 2.0], # Side
-        [inner_radius, wall_thickness / 2.0, wall_height / 2.0], # Front/Back
-        [inner_radius, wall_thickness / 2.0, wall_height / 2.0], # Front/Back
+        [radius, radius, base_thickness / 2.0],
+        [wall_thickness / 2.0, inner_radius, wall_height / 2.0],
+        [wall_thickness / 2.0, inner_radius, wall_height / 2.0],
+        [inner_radius, wall_thickness / 2.0, wall_height / 2.0],
+        [inner_radius, wall_thickness / 2.0, wall_height / 2.0],
     ]
     collision_positions = [
         [0.0, 0.0, 0.0],
@@ -65,10 +65,10 @@ def create_rice_bowl(
     )
     p.changeDynamics(
         bodyUniqueId=body_id,
-        linkIndex=-1, # Base link
-        lateralFriction=friction, # Use the (now higher) friction value
-        spinningFriction=friction * 0.8, # Increase spinning friction too
-        rollingFriction=friction * 0.1, # Keep rolling friction low
+        linkIndex=-1,
+        lateralFriction=friction,
+        spinningFriction=friction * 0.8,
+        rollingFriction=friction * 0.1,
         restitution=0.0,
         physicsClientId=client_id,
     )

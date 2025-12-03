@@ -86,24 +86,20 @@ class Camera:
         self._far = float(far)
         self._noise = noise or CameraNoiseModel()
 
-        # Intrinsic matrix (pinhole, origin at top-left, y downward)
         f = (self._height / 2.0) / math.tan(math.radians(self._fov_deg) / 2.0)
         cx = (self._width - 1) / 2.0
         cy = (self._height - 1) / 2.0
         self._intrinsics = np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]], dtype=float)
 
-        # Free-camera pose (used when not mounted)
         self._world_position = np.array(view_xyz, dtype=float)
         self._world_rotation = _rotation_from_euler(view_rpy_deg)  # maps camera frame -> world
 
-        # Mount configuration
         self._mounted = False
         self._parent_body: Optional[int] = None
         self._parent_link: Optional[int] = None
         self._rel_translation = np.zeros(3, dtype=float)
         self._rel_rotation = np.eye(3, dtype=float)
 
-        # Extrinsic caches (OpenGL frame and CV frame)
         self._T_world_cam_gl = np.eye(4, dtype=float)
         self._T_cam_world_gl = np.eye(4, dtype=float)
         self._T_world_cam_cv = np.eye(4, dtype=float)
@@ -161,7 +157,7 @@ class Camera:
         if abs(np.dot(forward, up_hint)) > 0.95:
             up_hint = np.array([0.0, 1.0, 0.0], dtype=float)
 
-        z_cam = forward  # +Z forward
+        z_cam = forward 
         x_cam = np.cross(up_hint, z_cam)
         if np.linalg.norm(x_cam) < 1e-6:
             x_cam = np.cross(np.array([1.0, 0.0, 0.0], dtype=float), z_cam)
@@ -170,9 +166,6 @@ class Camera:
         R_world_cam = np.column_stack([x_cam, y_cam, z_cam])
         self._rel_rotation = link_rot.T @ R_world_cam
         self._update_from_mount()
-
-    # ------------------------------------------------------------------ #
-    # Capture
 
     def get_rgbd(self, with_segmentation: bool = False):
         """Return RGB, depth (meters), intrinsics, and optional segmentation mask."""
@@ -183,7 +176,7 @@ class Camera:
 
         eye = self._T_world_cam_gl[:3, 3]
         R_wc = self._T_world_cam_gl[:3, :3]
-        forward = R_wc[:, 2]  # +Z forward
+        forward = R_wc[:, 2]
         up = R_wc[:, 1]
         target = eye + forward
 
