@@ -3,5 +3,5 @@
 Activate your virtual environment with dependencies in `requirements.txt`
 
 ```
-python main_stir.py
+python main.py
 ```
