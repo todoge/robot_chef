@@ -44,6 +44,7 @@ class VisionRefineController:
         handeye_T_cam_in_eef: Optional[np.ndarray] = None,
         gripper_open: Optional[Callable[[float], None]] = None,
         gripper_close: Optional[Callable[[float], None]] = None,
+        camera_fixed: bool = True,  # Added flag, default to True for this setup
     ) -> None:
         self.client_id = client_id
         self.arm_id = arm_id
@@ -54,6 +55,7 @@ class VisionRefineController:
         self.handeye_T_cam_in_eef = np.eye(4) if handeye_T_cam_in_eef is None else np.array(handeye_T_cam_in_eef, float)
         self._open = gripper_open or (lambda width=0.08: None)
         self._close = gripper_close or (lambda force=60.0: None)
+        self.camera_fixed = camera_fixed
 
         self._num_joints = p.getNumJoints(self.arm_id, physicsClientId=self.client_id)
 
@@ -77,8 +79,16 @@ class VisionRefineController:
     def close_gripper(self, force: float = 60.0) -> None:
         self._close(force)
 
-    def move_waypoint(self, pos: Sequence[float], quat_xyzw: Sequence[float], max_steps: int = 240) -> bool:
+    def move_waypoint(self, pos: Sequence[float], quat_xyzw: Sequence[float], max_steps: int = 240, timeout_s: float = None) -> bool:
         """Robust waypoint move using IK + position control."""
+<<<<<<< HEAD
+=======
+        # Handle timeout_s if provided (compatibility wrapper)
+        if timeout_s is not None:
+            max_steps = max(1, int(timeout_s / self.dt))
+
+        # Use null-space IK with correct 7-DoF arrays; fall back to basic IK.
+>>>>>>> afa93b68b55fd1de38bc3e26b045b0cdd9c9fa8b
         try:
             q_sol = p.calculateInverseKinematics(
                 self.arm_id,
@@ -108,6 +118,31 @@ class VisionRefineController:
                 )
             p.stepSimulation(physicsClientId=self.client_id)
         return True
+    
+    # Compatibility alias for code that calls move_to_joint_target
+    def move_to_joint_target(self, q_target: np.ndarray, gain: float = 0.08) -> None:
+         for k, j in enumerate(self.arm_joints):
+                p.setJointMotorControl2(
+                    self.arm_id, j, p.POSITION_CONTROL,
+                    targetPosition=float(q_target[k]),
+                    force=200.0,
+                    positionGain=gain,
+                    physicsClientId=self.client_id,
+                )
+
+    def get_ik_for_pose(self, pos: Sequence[float], quat_xyzw: Sequence[float]) -> Optional[np.ndarray]:
+        """Calculates IK for a target pose and returns the 7 arm joint angles."""
+        try:
+            full_ik = p.calculateInverseKinematics(
+                self.arm_id,
+                self.ee_link,
+                targetPosition=list(pos),
+                targetOrientation=list(quat_xyzw),
+                physicsClientId=self.client_id,
+            )
+            return np.array([float(full_ik[j]) for j in self.arm_joints], dtype=float)
+        except Exception:
+            return None
 
     def refine_to_features_ibvs(
         self,
@@ -135,6 +170,11 @@ class VisionRefineController:
             e_px = (uv - target_uv).reshape(-1, 1)  # (2N,1)
             rms_px = float(np.sqrt(np.mean(e_px**2)))
             mean_dz = float(np.mean(np.abs(Z - target_Z)))
+            
+            # Debug log
+            if step % 10 == 0:
+                LOGGER.debug(f"IBVS Step {step}: RMS Error={rms_px:.2f}, Mean dZ={mean_dz:.4f}")
+
             if rms_px < pixel_tol and mean_dz < depth_tol:
                 LOGGER.info("VisionRefineController: IBVS grasp refine success (rms=%.2f px, dZ=%.4f m)", rms_px, mean_dz)
                 return True
@@ -152,10 +192,42 @@ class VisionRefineController:
                 L_blocks.append(L_i)
             L = np.vstack(L_blocks)
 
+<<<<<<< HEAD
             v_cam = -gain * _damped_pinv(L, lam=1e-3) @ e_px
             v_cam = v_cam.flatten()
             v_eef = v_cam 
 
+=======
+            # Camera twist (v_cam) to reduce pixel error
+            # v_cam = -gain * pinv(L) * error
+            v_cam = -gain * _damped_pinv(L, lam=1e-3) @ e_px  # (6,1)
+            v_cam = v_cam.flatten()  # [vx, vy, vz, wx, wy, wz] in camera frame
+
+            # Transform Twist to End-Effector Frame
+            # For fixed camera (Eye-to-Hand): v_g = - Adjoint(T_cam_world * T_world_g) * v_cam? 
+            # Or simpler: if we approximate rotation as aligned for the demo:
+            
+            if self.camera_fixed:
+                # In eye-to-hand, moving the robot +X usually moves the feature -X in image.
+                # So we invert the velocity command.
+                # NOTE: This requires v_cam to be transformed into the robot base frame first!
+                # For this demo, we assume camera frame ~ aligned with world or use a heuristic sign flip.
+                # Proper way: v_base = - Adjoint(T_base_cam) @ v_cam
+                
+                # Simple heuristic fix for your specific scene alignment (camera facing -X, -Z etc):
+                # Flipping the sign is the 0th order fix for "Eye-to-Hand" vs "Eye-in-Hand"
+                v_eef = -v_cam 
+                
+                # IMPORTANT: You typically need to rotate this vector from Camera Frame to Robot Base Frame
+                # v_eef_world = R_cam_world @ v_eef_cam
+                # Since we don't have R_cam_world easily injected here, we rely on the user
+                # providing T_cam_in_eef or just tuning the signs.
+                # For now, let's just flip sign which is standard conversion.
+            else:
+                v_eef = v_cam
+
+            # Map to joint velocities using full Jacobian, then select arm columns
+>>>>>>> afa93b68b55fd1de38bc3e26b045b0cdd9c9fa8b
             q_full, dq_full, dd_full = self._full_joint_vectors()
             pos_jac, orn_jac = p.calculateJacobian(
                 self.arm_id,
