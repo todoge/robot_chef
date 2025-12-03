@@ -49,23 +49,19 @@ def create_spatula(
         orientations.append(list(orientation_local))
         colors.append(list(color))
 
-    # 1. Handle (Cylinder-ish via Capsule or Box)
-    # Using Box for stability in gripper
     append_shape(
         p.GEOM_BOX,
         half=(handle_radius, handle_radius, handle_length / 2.0),
-        position=(0.0, 0.0, 0.0), # Center of handle is origin
-        color=(0.1, 0.1, 0.1, 1.0), # Dark handle
+        position=(0.0, 0.0, 0.0),
+        color=(0.1, 0.1, 0.1, 1.0),
     )
 
-    # 2. Blade (Flat Box)
-    # Attached to the end of the handle (z = +handle_length/2)
     blade_z = handle_length / 2.0 + blade_length / 2.0
     append_shape(
         p.GEOM_BOX,
         half=(blade_width / 2.0, blade_thickness / 2.0, blade_length / 2.0),
         position=(0.0, 0.0, blade_z),
-        color=(0.7, 0.7, 0.8, 1.0), # Metal blade
+        color=(0.7, 0.7, 0.8, 1.0),
     )
 
     collision = p.createCollisionShapeArray(

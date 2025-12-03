@@ -1,13 +1,3 @@
-"""Simulation harness for the Robot Chef pouring task.
-
-- Builds table, bowl, pan and a stove support block.
-- Uses AABB-based snapping so the stove sits on the table, the pan sits on the stove,
-  and the bowl sits on the table (deterministic contact layout).
-- Adds two fixed pedestals ("mounts") and places the Panda arms on their tops at
-  the table's top-Z, with XY positions computed from the table AABB + a safety margin,
-  so mounts never intersect the table, regardless of scene.world_yaw_deg.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -26,11 +16,6 @@ from .env.particles import ParticleSet, spawn_spheres
 
 LOGGER = logging.getLogger(__name__)
 
-
-# --------------------------------------------------------------------------- #
-# Data containers
-
-
 @dataclass
 class ArmState:
     body_id: int
@@ -41,10 +26,6 @@ class ArmState:
     joint_upper: Tuple[float, ...]
     joint_ranges: Tuple[float, ...]
     joint_rest: Tuple[float, ...]
-
-
-# --------------------------------------------------------------------------- #
-# Simulation
 
 
 class RobotChefSimulation:
@@ -66,18 +47,15 @@ class RobotChefSimulation:
         self.objects: Dict[str, Dict[str, object]] = {}
         self.particles: Optional[ParticleSet] = None
 
-        # Build environment (table, bowl, pan, stove) and snap with AABBs
         self._setup_environment()
 
-        # Pedestals with collision-safe placement and arm mounting
         left_mount_id, right_mount_id, z_table = self._place_pedestals_clear_of_table(
-            side=0.20,   # 20 cm square column
-            margin=0.08  # 8 cm clearance from table edges
+            side=0.20, 
+            margin=0.08
         )
         self.objects["left_mount"] = {"body_id": left_mount_id, "top_z": z_table}
         self.objects["right_mount"] = {"body_id": right_mount_id, "top_z": z_table}
 
-        # Mount Panda arms on pedestal tops (useFixedBase=True), aligned with table yaw
         yaw = math.radians(self.recipe.scene.world_yaw_deg)
         left_base_pos, _ = p.getBasePositionAndOrientation(left_mount_id, physicsClientId=self.client_id)
         right_base_pos, _ = p.getBasePositionAndOrientation(right_mount_id, physicsClientId=self.client_id)
@@ -91,13 +69,9 @@ class RobotChefSimulation:
             base_orientation=p.getQuaternionFromEuler([0.0, 0.0, yaw - math.pi / 2.0]),
         )
 
-        # Default active arm is the right arm for pouring motions.
         self._active_arm_name = "right"
         self.gripper_open()
         self.step_simulation(steps=60)
-
-    # ------------------------------------------------------------------ #
-    # Environment & robot helpers
 
     def get_gripper_width(self, arm: Optional[str] = None) -> float:
         """Get the current distance between the two gripper fingers."""
@@ -106,7 +80,7 @@ class RobotChefSimulation:
         j2 = arm_state.finger_joints[1]
         s1 = p.getJointState(arm_state.body_id, j1, physicsClientId=self.client_id)
         s2 = p.getJointState(arm_state.body_id, j2, physicsClientId=self.client_id)
-        width = float(s1[0]) + float(s2[0])  # Each joint is half the width
+        width = float(s1[0]) + float(s2[0]) 
         return width
     
     def _setup_environment(self) -> None:
@@ -114,8 +88,6 @@ class RobotChefSimulation:
         plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client_id)
         self.objects["plane"] = {"body_id": plane_id}
 
-        # Position the table; we’ll snap objects to its true top using AABB.
-        # The table URDF origin is commonly at the ground; we lift/pose it here.
         table_height_offset = -0.05
         table_pos = [0.5, 0.0, table_height_offset]
         table_orientation = p.getQuaternionFromEuler([0.0, 0.0, math.radians(self.recipe.scene.world_yaw_deg)])
@@ -128,7 +100,6 @@ class RobotChefSimulation:
         )
         self.objects["table"] = {"body_id": table_id, "base_position": table_pos}
 
-        # Create bowl and pan at configured poses (apply world yaw).
         bowl_pose = self._apply_world_yaw(self.recipe.bowl_pose)
         bowl_id, bowl_props = bowl_factory.create_rice_bowl(self.client_id, pose=bowl_pose)
         self.objects["bowl"] = {"body_id": bowl_id, "properties": bowl_props, "pose": bowl_pose}
@@ -137,16 +108,14 @@ class RobotChefSimulation:
         pan_id, pan_props = pan_factory.create_pan(self.client_id, pose=pan_pose)
         self.objects["pan"] = {"body_id": pan_id, "properties": pan_props, "pose": pan_pose}
 
-        # Build a stove “support block” sized from pan props (visual + contact stability).
         stove_half_xy = float(pan_props["half_side"]) + float(pan_props["wall_thickness"]) + 0.02
         stove_height = float(max(0.01, float(pan_props["depth"]) * 0.9))
         stove_half_extent = (stove_half_xy, stove_half_xy, stove_height / 2.0)
 
-        # Initial pose; we’ll snap to table, then rest pan on stove.
         stove_pose = Pose6D(
             x=pan_pose.x,
             y=pan_pose.y,
-            z=pan_pose.z - stove_height,  # provisional, corrected by snapping
+            z=pan_pose.z - stove_height, 
             roll=0.0,
             pitch=0.0,
             yaw=pan_pose.yaw,
@@ -185,20 +154,15 @@ class RobotChefSimulation:
             "pose": stove_pose,
         }
 
-        # --- Deterministic placement using AABBs ---
         z_table = self._get_table_top_z()
 
-        # 1) Stove rests on TABLE
         self._place_on_support(stove_id, support_top_z=z_table)
 
-        # 2) Pan rests on STOVE
         stove_top = self._get_body_top_z(stove_id)
         self._place_on_support(pan_id, support_top_z=stove_top)
 
-        # 3) Bowl rests on TABLE
         self._place_on_support(bowl_id, support_top_z=z_table)
         
-        # Refresh stored poses after snapping so they are not stale
         self._update_object_pose("bowl")
         self._update_object_pose("pan")
         self._update_object_pose("stove_block")
@@ -212,14 +176,10 @@ class RobotChefSimulation:
              self.objects.get("pan", {}).get("pose")
         )
 
-        # Expose pan base height after snapping (useful for later metrics).
         pan_aabb_min, _ = p.getAABB(pan_id, physicsClientId=self.client_id)
         pan_props["base_height"] = float(pan_aabb_min[2])
 
-        # Let contacts settle for one frame (visual nicety).
         p.stepSimulation(physicsClientId=self.client_id)
-
-    # ---------- Mounts / pedestals with clearance ---------- #
 
     def _get_table_footprint(self) -> Tuple[Tuple[float, float], float, float, float, float]:
         """
@@ -241,8 +201,8 @@ class RobotChefSimulation:
         Unit axes of the table frame projected in world XY.
         +x_table points 'forward', +y_table to the table's left.
         """
-        ux = (math.cos(yaw), math.sin(yaw))           # +x_table in world
-        uy = (-math.sin(yaw), math.cos(yaw))          # +y_table in world
+        ux = (math.cos(yaw), math.sin(yaw))    
+        uy = (-math.sin(yaw), math.cos(yaw))   
         return ux, uy
 
     def _place_pedestals_clear_of_table(self, side: float = 0.20, margin: float = 0.08) -> Tuple[int, int, float]:
@@ -255,13 +215,9 @@ class RobotChefSimulation:
         ux, uy = self._table_local_axes(yaw)
 
         ped_half = side * 0.5
-        # Distance behind back edge (−x_table) to avoid collisions
         back_clear = half_x + margin + ped_half
 
-        # Lateral (±y_table) placement near the table edges with clearance
         lat_clear = max(0.0, half_y - margin - ped_half)
-        # World XY for left/right mounts
-        # left = +y_table; right = −y_table
         left_xy = (cx - ux[0] * back_clear + uy[0] * lat_clear,
                    cy - ux[1] * back_clear + uy[1] * lat_clear)
         right_xy = (cx - ux[0] * back_clear - uy[0] * lat_clear,
@@ -276,13 +232,13 @@ class RobotChefSimulation:
         Create a fixed mount (square column) from floor to top_z at world XY.
         The column is a box of size (side, side, height). Uses collision + visual.
         """
-        height = max(0.05, float(top_z))  # from z=0 (floor) up to top_z
+        height = max(0.05, float(top_z))  
         half_extents = (side / 2.0, side / 2.0, height / 2.0)
         col_id = p.createCollisionShape(p.GEOM_BOX, halfExtents=half_extents, physicsClientId=self.client_id)
         vis_id = p.createVisualShape(
             p.GEOM_BOX,
             halfExtents=half_extents,
-            rgbaColor=[0.35, 0.35, 0.38, 1.0],  # neutral “metallic” tone
+            rgbaColor=[0.35, 0.35, 0.38, 1.0],  
             physicsClientId=self.client_id,
         )
         body_id = p.createMultiBody(
@@ -295,8 +251,6 @@ class RobotChefSimulation:
         )
         p.changeDynamics(body_id, -1, lateralFriction=1.0, spinningFriction=0.6, physicsClientId=self.client_id)
         return body_id
-
-    # ---------- Arm spawning ---------- #
 
     def _spawn_arm(self, base_position: Sequence[float], base_orientation: Sequence[float]) -> ArmState:
         flags = p.URDF_USE_SELF_COLLISION | p.URDF_USE_SELF_COLLISION_EXCLUDE_ALL_PARENTS
@@ -332,7 +286,6 @@ class RobotChefSimulation:
         if len(joint_indices) != 7:
             raise RuntimeError("Expected Franka Panda arm with 7 revolute joints")
 
-        # Find Panda end-effector link "panda_hand".
         ee_link_index = None
         for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
             info = p.getJointInfo(arm_id, j, physicsClientId=self.client_id)
@@ -343,7 +296,6 @@ class RobotChefSimulation:
             LOGGER.warning("panda_hand link not found; defaulting to final arm joint link")
             ee_link_index = joint_indices[-1]
 
-        # Finger joints.
         finger_joint_names = {"panda_finger_joint1", "panda_finger_joint2"}
         fingers: List[int] = []
         for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
@@ -353,7 +305,6 @@ class RobotChefSimulation:
         if len(fingers) != 2:
             raise RuntimeError("Failed to locate Panda finger joints")
 
-        # Initialize arm joints.
         for idx in joint_indices:
             p.resetJointState(arm_id, idx, targetValue=0.0, targetVelocity=0.0, physicsClientId=self.client_id)
             p.setJointMotorControl2(
@@ -375,9 +326,6 @@ class RobotChefSimulation:
             joint_ranges=tuple(joint_ranges),
             joint_rest=tuple(joint_rest),
         )
-
-    # ------------------------------------------------------------------ #
-    # Public API
 
     def step_simulation(self, steps: int) -> None:
         for _ in range(max(1, int(steps))):
@@ -453,7 +401,7 @@ class RobotChefSimulation:
     def spawn_rice_particles(
         self,
         count: int,
-        radius: float = 0.01,  # UPDATED DEFAULT RADIUS
+        radius: float = 0.01,
         seed: int = 7,
     ) -> Optional[ParticleSet]:
         bowl_entry = self.objects.get("bowl")
@@ -496,9 +444,6 @@ class RobotChefSimulation:
     def disconnect(self) -> None:
         if p.isConnected(self.client_id):
             p.disconnect(self.client_id)
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
 
     def _get_arm(self, arm: Optional[str]) -> ArmState:
         arm_name = arm or self._active_arm_name
@@ -550,7 +495,6 @@ class RobotChefSimulation:
             physicsClientId=self.client_id,
         )
 
-    # Backwards-compatible alias (used by older code)
     def _place_on_table(self, body_id: int, z_table: float) -> None:
         self._place_on_support(body_id, support_top_z=z_table)
 

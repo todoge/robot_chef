@@ -1,18 +1,11 @@
-# Scene Setup
 scene:
   world_yaw_deg: 0
 
-# The target bowl position
-# MOVED CLOSER TO EDGE: x=0.35 (was 0.45)
-# SLIGHTLY AWAY FROM ARM: y=0.40 (was 0.45)
 bowl_pose: [0.0, 0.25, 0.75, 0.0, 0.0, 0.0]
 
-# The pan position
-# Right side
 pan_pose:  [0.25, -0.3, 0.75, 0.0, 0.0, 3.1416]
 pan_pour_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-# Standard camera settings
 camera:
   active_view: default
   near: 0.05
@@ -27,7 +20,6 @@ camera:
     depth_std: 0.0
     drop_prob: 0.0
 
-# Task Params
 perception:
   enable: false
   bowl_roi_margin_m: 0.12

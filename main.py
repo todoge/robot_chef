@@ -1,4 +1,3 @@
-# main.py
 from __future__ import annotations
 import argparse, logging, sys
 from pathlib import Path
@@ -15,14 +14,12 @@ def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     
-    # Defer imports
     from robot_chef import config
     from robot_chef.simulation import RobotChefSimulation
 
     cfg = config.load_pour_task_config(Path(args.config))
     sim = RobotChefSimulation(gui=not args.headless, recipe=cfg)
 
-    # Task Selection
     if args.task == "pour_bowl_into_pan":
         from robot_chef.tasks.pour_bowl_into_pan import PourBowlIntoPanAndReturn
         task = PourBowlIntoPanAndReturn()

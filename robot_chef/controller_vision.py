@@ -1,4 +1,3 @@
-# robot_chef/controller_vision.py
 """Image-based visual servo controller for the wrist-mounted camera."""
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ class VisionRefineController:
         self.client_id = int(client_id)
         self.arm_id = int(arm_id)
         self.ee_link = int(ee_link)
-        self.arm_joints = [int(j) for j in arm_joints]  # body joint indices for the 7 arm joints
+        self.arm_joints = [int(j) for j in arm_joints]
         self.dt = float(dt)
         self.camera = camera
         self._open = gripper_open or (lambda width=0.08: None)
@@ -64,7 +63,6 @@ class VisionRefineController:
             raise ValueError("handeye_T_cam_in_eef must be 4x4")
         self._Adj_cam_eef = _adjoint(self._T_cam_eef)
 
-        # ---- Build DoF list (movable joints only) and map: joint_index -> dof_col ----
         self._movable_joint_indices: List[int] = []
         self._dof_from_joint: dict[int, int] = {}
         n = p.getNumJoints(self.arm_id, physicsClientId=self.client_id)
@@ -77,13 +75,9 @@ class VisionRefineController:
         if not self._movable_joint_indices:
             raise RuntimeError("No movable joints detected for arm; cannot compute Jacobian.")
 
-        # Map the 7 arm joints into DoF columns (ignore fingers for IBVS)
         self._arm_dof_cols: List[int] = [self._dof_from_joint[j] for j in self.arm_joints if j in self._dof_from_joint]
         if len(self._arm_dof_cols) != len(self.arm_joints):
             LOGGER.warning("Some arm joints are not movable or not found in DoF map; IBVS may be ill-posed.")
-
-    # ------------------------------------------------------------------ #
-    # Gripper helpers
 
     def open_gripper(self, width: float = 0.08) -> None:
         self._open(width)
@@ -91,15 +85,11 @@ class VisionRefineController:
     def close_gripper(self, force: float = 60.0) -> None:
         self._close(force)
 
-    # ------------------------------------------------------------------ #
-    # Waypoint motion
-
     def move_waypoint(self, pos: Sequence[float], quat_xyzw: Sequence[float], timeout_s: float = 3.0) -> bool:
         """Moves to a target pose using PyBullet's internal controller."""
         pos = [float(v) for v in pos]
         quat_xyzw = [float(v) for v in quat_xyzw]
         try:
-            # Use lower limits and higher range if available (more robust IK)
             ll, ul, jr, rp = self._get_joint_info()
             full_ik = p.calculateInverseKinematics(
                 self.arm_id,
@@ -124,24 +114,22 @@ class VisionRefineController:
 
         target = [float(full_ik[j]) for j in self.arm_joints]
         t0 = time.time()
-        # The internal loop handles the motion over time
         while time.time() - t0 < timeout_s:
             p.setJointMotorControlArray(
                 self.arm_id,
                 self.arm_joints,
                 p.POSITION_CONTROL,
                 target,
-                positionGains=[0.08] * len(self.arm_joints), # Standard gain
+                positionGains=[0.08] * len(self.arm_joints),
                 forces=[200.0] * len(self.arm_joints),
                 physicsClientId=self.client_id,
             )
-            p.stepSimulation(physicsClientId=self.client_id) # Step sim inside loop
+            p.stepSimulation(physicsClientId=self.client_id)
 
-            # Optional: Add an early exit condition if target is reached
             current_q, _ = self._get_arm_joint_states()
-            if np.linalg.norm(np.array(target) - current_q) < 0.01: # Check if close enough
+            if np.linalg.norm(np.array(target) - current_q) < 0.01:
                  break
-        return True # Return true even if timeout reached, assume it got close
+        return True
 
     def get_ik_for_pose(
         self, pos: Sequence[float], quat_xyzw: Sequence[float]
@@ -173,11 +161,6 @@ class VisionRefineController:
             LOGGER.error("IK failed: %s", exc)
             return None
 
-    # --- REMOVED move_to_joint_target ---
-
-    # ------------------------------------------------------------------ #
-    # IBVS refinement (Unused in this setup, kept for potential future use)
-
     def refine_to_features_ibvs(
         self,
         *,
@@ -190,12 +173,7 @@ class VisionRefineController:
         gain: float = 0.35,
         max_joint_vel: float = 0.5,
     ) -> bool:
-        # ... (IBVS code remains here but won't be called) ...
-        LOGGER.warning("IBVS called but likely not intended for fixed camera setup.")
-        return True # Return true to avoid breaking sequence if called accidentally
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
+        return True
 
     def move_to_joint_target(
             self, q_target: np.ndarray, gain: float = 0.08
@@ -207,23 +185,21 @@ class VisionRefineController:
                 self.arm_joints,
                 p.POSITION_CONTROL,
                 target_list,
-                positionGains=[gain] * len(self.arm_joints), # Use the provided gain
+                positionGains=[gain] * len(self.arm_joints),
                 forces=[200.0] * len(self.arm_joints),
                 physicsClientId=self.client_id,
             )
     def _get_joint_info(self) -> Tuple[List[float], List[float], List[float], List[float]]:
         """Gets limits, ranges, and rest poses for IK calculation."""
         ll, ul, jr, rp = [], [], [], []
-        # Get info for all movable joints, needed for full IK solution
         num_joints = p.getNumJoints(self.arm_id, physicsClientId=self.client_id)
         for i in range(num_joints):
              joint_info = p.getJointInfo(self.arm_id, i, physicsClientId=self.client_id)
              q_index = joint_info[3]
-             if q_index > -1: # It's a movable joint
+             if q_index > -1:
                   ll.append(joint_info[8])
                   ul.append(joint_info[9])
                   jr.append(joint_info[9] - joint_info[8])
-                  # Simple midpoint rest pose
                   rp.append((joint_info[8] + joint_info[9]) / 2)
         return ll, ul, jr, rp
 

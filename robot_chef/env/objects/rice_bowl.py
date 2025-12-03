@@ -13,11 +13,11 @@ def create_rice_bowl(
     client_id: int,
     pose: config.Pose6D,
     radius: float = 0.07,
-    inner_height: float = 0.08, # Increased from 0.05 to prevent spills
+    inner_height: float = 0.08,
     wall_thickness: float = 0.008,
     base_thickness: float = 0.006,
     mass: float = 0.3,
-    friction: float = 1.2, # Increased friction for better grasp
+    friction: float = 1.2, 
 ) -> Tuple[int, Dict[str, float]]:
     """Spawn a compound rice bowl that can contain particles."""
     orientation = p.getQuaternionFromEuler(pose.orientation_rpy)
@@ -25,9 +25,8 @@ def create_rice_bowl(
     inner_radius = radius - wall_thickness
     wall_height = inner_height
 
-    # --- BEGIN FIX: Replaced base cylinder with a box ---
     shape_types = [
-        p.GEOM_BOX,  # base disk (NOW A BOX)
+        p.GEOM_BOX,
         p.GEOM_BOX,
         p.GEOM_BOX,
         p.GEOM_BOX,
@@ -36,11 +35,11 @@ def create_rice_bowl(
     radii = [0.0, 0.0, 0.0, 0.0, 0.0]
     lengths = [0.0, 0.0, 0.0, 0.0, 0.0]
     half_extents = [
-        [radius, radius, base_thickness / 2.0], # <-- FIXED BASE
+        [radius, radius, base_thickness / 2.0],
         [wall_thickness / 2.0, inner_radius, wall_height / 2.0],
         [wall_thickness / 2.0, inner_radius, wall_height / 2.0],
-        [inner_radius, wall_thickness / 2.0, wall_height / 2.0], # <-- Reverted
-        [inner_radius, wall_thickness / 2.0, wall_height / 2.0], # <-- Reverted
+        [inner_radius, wall_thickness / 2.0, wall_height / 2.0],
+        [inner_radius, wall_thickness / 2.0, wall_height / 2.0],
     ]
     
     collision_positions = [

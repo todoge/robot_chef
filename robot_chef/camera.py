@@ -86,33 +86,26 @@ class Camera:
         self._far = float(far)
         self._noise = noise or CameraNoiseModel()
 
-        # Intrinsic matrix (pinhole, origin at top-left, y downward)
         f = (self._height / 2.0) / math.tan(math.radians(self._fov_deg) / 2.0)
         cx = (self._width - 1) / 2.0
         cy = (self._height - 1) / 2.0
         self._intrinsics = np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]], dtype=float)
 
-        # Free-camera pose (used when not mounted)
         self._world_position = np.array(view_xyz, dtype=float)
         self._world_rotation = _rotation_from_euler(view_rpy_deg)  # maps camera frame -> world
 
-        # Mount configuration
         self._mounted = False
         self._parent_body: Optional[int] = None
         self._parent_link: Optional[int] = None
         self._rel_translation = np.zeros(3, dtype=float)
         self._rel_rotation = np.eye(3, dtype=float)
 
-        # Extrinsic caches (OpenGL frame and CV frame)
         self._T_world_cam_gl = np.eye(4, dtype=float)
         self._T_cam_world_gl = np.eye(4, dtype=float)
         self._T_world_cam_cv = np.eye(4, dtype=float)
         self._T_cam_world_cv = np.eye(4, dtype=float)
 
         self._update_from_free_pose()
-
-    # ------------------------------------------------------------------ #
-    # Mounting / configuration
 
     def mount_to_link(
         self,
@@ -174,9 +167,6 @@ class Camera:
         self._rel_rotation = link_rot.T @ R_world_cam
         self._update_from_mount()
 
-    # ------------------------------------------------------------------ #
-    # Capture
-
     def get_rgbd(self, with_segmentation: bool = False):
         """Return RGB, depth (meters), intrinsics, and optional segmentation mask."""
         if self._mounted:
@@ -225,9 +215,6 @@ class Camera:
 
         return rgb, depth.astype(np.float32), self._intrinsics.copy(), seg_mask
 
-    # ------------------------------------------------------------------ #
-    # Accessors
-
     @property
     def intrinsics(self) -> np.ndarray:
         return self._intrinsics.copy()
@@ -248,9 +235,6 @@ class Camera:
         pos = self._T_world_cam_gl[:3, 3].copy()
         quat = _quaternion_from_matrix(self._T_world_cam_gl[:3, :3])
         return pos, np.asarray(quat, dtype=float)
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
 
     def _update_free_orientation(self, target_xyz: Sequence[float]) -> None:
         eye = self._world_position
@@ -292,7 +276,6 @@ class Camera:
         self._update_cv_frames()
 
     def _update_cv_frames(self) -> None:
-        # Convert OpenGL camera frame (x right, y up, z forward) to CV convention (x right, y down, z forward)
         T_gl_to_cv = np.eye(4, dtype=float)
         T_gl_to_cv[1, 1] = -1.0
         T_cv_to_gl = T_gl_to_cv
