@@ -1,13 +1,11 @@
 import json
 import logging
 import math
-from typing import Dict, Optional
 
 import numpy as np
 import pybullet as p
 
-from robot_chef.camera import Camera, CameraNoiseModel
-from robot_chef.config import MainConfig, Pose6D
+from robot_chef.config import MainConfig
 from robot_chef.simulator import StirSimulator
 from robot_chef.utils import pause
 
@@ -21,24 +19,8 @@ class TaskStir:
         self.cfg = cfg
         self.sim.open_grippers(arm="right")
         self.sim.open_grippers(arm="left")
-        cam_view_cfg = cfg.camera.get_active_view()
-        cam_noise_cfg = cfg.camera.noise
-        self.camera = Camera(
-            client_id=self.sim.client_id,
-            fov_deg=cam_view_cfg.fov_deg,
-            near=cfg.camera.near,
-            far=cfg.camera.far,
-            resolution=cam_view_cfg.resolution,
-            noise=CameraNoiseModel(
-                depth_std=cam_noise_cfg.depth_std,
-                drop_prob=cam_noise_cfg.drop_prob,
-            ),
-            view_xyz=cam_view_cfg.xyz,
-            view_rpy_deg=cam_view_cfg.rpy_deg,
-        )
-
-        self.wrist_comp_pitch = 0.0  # Current compensation angle
-        self.pan_hold_pos = None     # Where we want the pan to stay
+        self.wrist_comp_pitch = 0.0
+        self.pan_hold_pos = None
 
     def plan(self) -> bool:
         return True
@@ -121,242 +103,7 @@ class TaskStir:
             self.sim.set_joint_velocities(velocities, arm=arm)
             self.sim.step_simulation(steps=1)
 
-    # def _prepare_pan(self, arm: str) -> None:
-    #     # === GET PAN GEOMETRY ===
-    #     pan_id = self.sim.objects["pan"]["body_id"]
-    #     props = self.sim.objects["pan"]["properties"]
-
-    #     handle_offset = props["handle_offset"]
-    #     handle_length = props["handle_length"]
-    #     depth = props["depth"]
-    #     wall_thickness = props["wall_thickness"]
-
-    #     slider_map = self.sim.setup_debug_sliders(arm)
-    #     self.sim.interactive_mode_loop(arm, slider_map)
-
-    #     # # === PAN POSE ===
-    #     # pan_pos, pan_orn = p.getBasePositionAndOrientation(pan_id)
-    #     # rot = np.array(p.getMatrixFromQuaternion(pan_orn)).reshape(3,3)
-
-    #     # # === COMPUTE GRASP POINT ALONG HANDLE ===
-    #     # grasp_fraction = 0.7   # 0 = very base, 1 = very tip
-
-    #     # # handle center base position in local frame
-    #     base_local_x = handle_offset - handle_length/2
-
-    #     # grasp_local = np.array([
-    #     #     base_local_x + grasp_fraction * handle_length,
-    #     #     0,
-    #     #     depth/2 + wall_thickness  # handle height
-    #     # ])
-
-    #     # # convert to world coordinates
-    #     # grasp_world = np.array(pan_pos) + rot @ grasp_local
-
-    #     # # move slightly above before descending
-    #     # approach_world = grasp_world + np.array([0,0,0.10])
-
-    #     # LOGGER.info(f"Target Grasp World Position: {grasp_world}")
-    #     # LOGGER.info(f"Target Approach World Position: {approach_world}")
-
-    #     # # === ORIENT END EFFECTOR TO GRASP HANDLE ===
-    #     # yaw = p.getEulerFromQuaternion(pan_orn)[2]
-    #     # grip_quat = p.getQuaternionFromEuler([math.pi/2, 0, yaw])
-
-    #     # # === MOVE TO APPROACH POSE ===
-    #     # j_approach = self._inverse_kinematics(arm, approach_world, grip_quat)
-    #     # self._move_arm_damp_velo(arm, j_approach)
-
-    #     # # === MOVE DOWN TO GRASP ===
-    #     # j_grasp = self._inverse_kinematics(arm, grasp_world, grip_quat)
-    #     # self._move_arm_damp_velo(arm, j_grasp)
-
-    #     # # === CLOSE GRIPPER ===
-    #     # self.sim.gripper_close(arm=arm)
-    #     # self.sim.step_simulation(steps=240)
-
-    #     # # === FIX CONSTRAINT SO PAN MOVES WITH ROBOT ===
-    #     # gripper_link = self.sim.arm[arm].ee_link
-    #     # c_id = p.createConstraint(
-    #     #     parentBodyUniqueId=self.sim.arm[arm].body_id,
-    #     #     parentLinkIndex=gripper_link,
-    #     #     childBodyUniqueId=pan_id,
-    #     #     childLinkIndex=-1,
-    #     #     jointType=p.JOINT_FIXED,
-    #     #     jointAxis=[0,0,0],
-    #     #     parentFramePosition=[0,0,0],
-    #     #     childFramePosition=[0,0,0],
-    #     #     physicsClientId=self.sim.client_id,
-    #     # )
-
-    #     # print("Grasped pan at world:", grasp_world)
-
-    # def _prepare_pan(self, arm: str) -> None:
-    #     # === GET PAN GEOMETRY ===
-    #     pan_id = self.sim.objects["pan"]["body_id"]
-    #     props = self.sim.objects["pan"]["properties"]
-
-    #     handle_offset = props["handle_offset"]
-    #     handle_length = props["handle_length"]
-    #     depth = props["depth"]
-    #     wall_thickness = props["wall_thickness"]
-
-    #     # === PAN POSE ===
-    #     pan_pos, pan_orn = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.sim.client_id)
-    #     rot = np.array(p.getMatrixFromQuaternion(pan_orn)).reshape(3,3)
-
-    #     grasp_fraction = 0.7    # 0 = very base, 1 = very tip
-    #     base_local_x = handle_offset - handle_length/2
-        
-    #     # Local Z position is the handle's top surface
-    #     handle_top_local_z = depth/2 + wall_thickness 
-
-    #     grasp_local = np.array([
-    #         base_local_x + grasp_fraction * handle_length,
-    #         0,
-    #         handle_top_local_z
-    #     ])
-
-    #     # convert to world coordinates
-    #     grasp_world = np.array(pan_pos) + rot @ grasp_local
-
-    #     # move slightly above before descending
-    #     # APPROACH POSE: 10 cm above the grasp point
-    #     approach_world = grasp_world + np.array([0,0,0.10]) 
-
-    #     LOGGER.info(f"Target Grasp World Position: {grasp_world}")
-    #     LOGGER.info(f"Target Approach World Position: {approach_world}")
-
-    #     # === ORIENT END EFFECTOR FOR TOP-DOWN GRASP ===
-    #     pan_yaw = p.getEulerFromQuaternion(pan_orn)[2]
-        
-    #     # This rotation points the gripper fingers down (pi roll)
-    #     # and aligns the gripper's opening with the handle's axis (pan_yaw)
-    #     grip_quat = p.getQuaternionFromEuler([math.pi, 0, pan_yaw]) 
-
-    #     # === MOVE TO APPROACH POSE ===
-    #     LOGGER.info("Arm approaching pan handle")
-    #     j_approach = self._inverse_kinematics(arm, approach_world, grip_quat)
-    #     self._move_arm_damp_velo(arm, j_approach)
-
-    #     # === MOVE DOWN TO GRASP ===
-    #     LOGGER.info("Arm to grasp pan handle")
-    #     j_grasp = self._inverse_kinematics(arm, grasp_world, grip_quat)
-    #     self.sim.set_joint_positions(j_grasp, arm)
-
-    #     # === CLOSE GRIPPER ===
-    #     LOGGER.info("Arm grasping pan handle")
-    #     self.sim.gripper_close(arm=arm)
-    #     self.sim.step_simulation(steps=240)
-
-    #     # === FIX CONSTRAINT SO PAN MOVES WITH ROBOT ===
-    #     LOGGER.info("Arm to pan handle constraint")
-    #     gripper_link = self.sim.arm[arm].ee_link
-    #     # p.createConstraint(
-    #     #     parentBodyUniqueId=self.sim.arm[arm].body_id,
-    #     #     parentLinkIndex=gripper_link,
-    #     #     childBodyUniqueId=pan_id,
-    #     #     childLinkIndex=-1,
-    #     #     jointType=p.JOINT_FIXED,
-    #     #     jointAxis=[0,0,0],
-    #     #     parentFramePosition=[0,0,0],
-    #     #     childFramePosition=[0,0,0],
-    #     #     physicsClientId=self.sim.client_id,
-    #     # )
-    #     arm_id = self.sim.arm[arm].body_id
-        
-    #     # 1. Get the exact current world positions
-    #     #    (Use physicsClientId to ensure we get the sim state, not rendered state)
-    #     ee_state = p.getLinkState(arm_id, gripper_link, physicsClientId=self.sim.client_id)
-    #     ee_world_pos, ee_world_orn = ee_state[0], ee_state[1]
-        
-    #     pan_world_pos, pan_world_orn = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.sim.client_id)
-
-    #     # 2. Compute the Pan's position/rotation relative to the Gripper Frame
-    #     #    Mathematically: T_gripper_to_pan = inv(T_world_to_gripper) * T_world_to_pan
-    #     inv_ee_pos, inv_ee_orn = p.invertTransform(ee_world_pos, ee_world_orn)
-        
-    #     # This calculates where the pan is, looking from the perspective of the gripper
-    #     parent_frame_pos, parent_frame_orn = p.multiplyTransforms(
-    #         inv_ee_pos, inv_ee_orn, 
-    #         pan_world_pos, pan_world_orn
-    #     )
-
-    #     # 3. Create the constraint using these calculated offsets
-    #     #    We lock the parent frame at the calculated offset, and the child frame at its own origin.
-    #     #    This tells PyBullet: "Keep them exactly this far apart and oriented this way."
-    #     c_id = p.createConstraint(
-    #         parentBodyUniqueId=arm_id,
-    #         parentLinkIndex=gripper_link,
-    #         childBodyUniqueId=pan_id,
-    #         childLinkIndex=-1,
-    #         jointType=p.JOINT_FIXED,
-    #         jointAxis=[0, 0, 0],
-    #         parentFramePosition=parent_frame_pos,      # <--- The calculated offset
-    #         childFramePosition=[0, 0, 0],              # <--- Pan origin
-    #         parentFrameOrientation=parent_frame_orn,   # <--- The calculated rotation
-    #         physicsClientId=self.sim.client_id,
-    #     )
-        
-    #     # 4. (Optional but recommended) Allow the constraint to be slightly "soft" 
-    #     #    to absorb numerical errors rather than exploding.
-    #     p.changeConstraint(c_id, maxForce=2000)
-
-    #     print("Grasped pan at world:", grasp_world)
-
-    #     # --------------------------------------------------------------
-    #     # CALCULATE LIFT & PULL VECTORS
-    #     # --------------------------------------------------------------
-    #     robot_id = self.sim.arm[arm].body_id
-    #     gripper_link = self.sim.arm[arm].ee_link
-        
-    #     # 1. Get current Gripper Position (World Frame)
-    #     ee_state = p.getLinkState(robot_id, gripper_link, physicsClientId=self.sim.client_id)
-    #     current_pos = np.array(ee_state[0])
-    #     current_orn = ee_state[1] # Keep the current orientation so we don't spill!
-
-    #     # 2. Get Robot Base Position
-    #     base_pos, _ = p.getBasePositionAndOrientation(robot_id, physicsClientId=self.sim.client_id)
-    #     base_pos = np.array(base_pos)
-
-    #     # 3. Calculate "Pull" Vector (Direction from Gripper -> Base)
-    #     # We ignore Z because we only want to pull horizontally
-    #     direction_vector = base_pos - current_pos
-    #     direction_vector[2] = 0.0  # Zero out Z
-        
-    #     # Normalize to get a unit vector (length of 1.0)
-    #     dist = np.linalg.norm(direction_vector)
-    #     if dist > 0:
-    #         direction_unit = direction_vector / dist
-    #     else:
-    #         direction_unit = np.array([0, 0, 0]) # Already at base (unlikely)
-
-    #     # 4. Define Movements
-    #     lift_amount = 0.1   # Lift 5cm up
-    #     pull_amount = 0.20   # Pull 10cm closer to body
-        
-    #     # 5. Compute Final Target
-    #     # Target = Current + (Up * amount) + (Direction * amount)
-    #     target_pos = current_pos + np.array([0, 0, lift_amount]) + (direction_unit * pull_amount)
-
-    #     LOGGER.info(f"Moving pan to hover: {target_pos}")
-
-    #     # --------------------------------------------------------------
-    #     # EXECUTE MOVE
-    #     # --------------------------------------------------------------
-        
-    #     # Calculate IK
-    #     j_hover = self._inverse_kinematics(arm, target_pos, current_orn)
-        
-    #     # Execute movement
-    #     # Since the pan is heavy (1.0kg), we might need a tighter tolerance or more steps
-    #     self._move_arm_damp_velo(arm, j_hover, tol=1e-3)
-        
-    #     # IMPORTANT: Lock the joints at the end to hold the weight
-    #     self.sim.set_joint_positions(j_hover, arm)
-
     def _prepare_pan(self, arm: str) -> None:
-        # === GET PAN GEOMETRY ===
         pan_id = self.sim.objects["pan"]["body_id"]
         props = self.sim.objects["pan"]["properties"]
 
@@ -365,15 +112,13 @@ class TaskStir:
         depth = props["depth"]
         wall_thickness = props["wall_thickness"]
 
-        # === PAN POSE ===
         pan_pos, pan_orn = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.sim.client_id)
         rot = np.array(p.getMatrixFromQuaternion(pan_orn)).reshape(3,3)
 
         grasp_fraction = 0.25
         base_local_x = handle_offset - handle_length/2
         
-        # Local Z position is the handle's top surface
-        handle_top_local_z = depth/2 + wall_thickness 
+        handle_top_local_z = depth / 2 + wall_thickness 
 
         grasp_local = np.array([
             base_local_x + grasp_fraction * handle_length,
@@ -381,56 +126,41 @@ class TaskStir:
             handle_top_local_z
         ])
 
-        # convert to world coordinates
         grasp_world = np.array(pan_pos) + rot @ grasp_local
-
-        # APPROACH POSE: 10 cm above the grasp point
         approach_world = grasp_world + np.array([0,0,0.15]) 
 
         LOGGER.info(f"Target Grasp World Position: {grasp_world}")
 
-        # === ORIENT END EFFECTOR FOR TOP-DOWN GRASP ===
         pan_yaw = p.getEulerFromQuaternion(pan_orn)[2]
         
-        # Point fingers down (pi) and align with handle (pan_yaw)
+        # point fingers down
         grip_quat = p.getQuaternionFromEuler([math.pi, 0, pan_yaw]) 
 
-        # === MOVE TO APPROACH POSE ===
         LOGGER.info("Arm approaching pan handle")
         j_approach = self._inverse_kinematics(arm, approach_world, grip_quat)
         self._move_arm_damp_velo(arm, j_approach)
 
-        # === MOVE DOWN TO GRASP ===
         LOGGER.info("Arm to grasp pan handle")
         j_grasp = self._inverse_kinematics(arm, grasp_world, grip_quat)
         self.sim.set_joint_positions(j_grasp, arm)
 
-        # === CLOSE GRIPPER ===
         LOGGER.info("Arm grasping pan handle")
         self.sim.gripper_close(arm=arm)
         self.sim.step_simulation(steps=240)
 
-        # === FIX CONSTRAINT SO PAN MOVES WITH ROBOT (PREVENTS DRIFT) ===
         LOGGER.info("Creating constraint to lock pan to gripper")
         arm_id = self.sim.arm[arm].body_id
         gripper_link = self.sim.arm[arm].ee_link
         
-        # 1. Get the exact current world positions
         ee_state = p.getLinkState(arm_id, gripper_link, physicsClientId=self.sim.client_id)
         ee_world_pos, ee_world_orn = ee_state[0], ee_state[1]
         
         pan_world_pos, pan_world_orn = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.sim.client_id)
-
-        # 2. Compute the Pan's position/rotation relative to the Gripper Frame
-        #    This calculates exactly "where the pan is right now" relative to the hand
         inv_ee_pos, inv_ee_orn = p.invertTransform(ee_world_pos, ee_world_orn)
-        
         parent_frame_pos, parent_frame_orn = p.multiplyTransforms(
             inv_ee_pos, inv_ee_orn, 
             pan_world_pos, pan_world_orn
         )
-
-        # 3. Create the constraint
         c_id = p.createConstraint(
             parentBodyUniqueId=arm_id,
             parentLinkIndex=gripper_link,
@@ -443,8 +173,6 @@ class TaskStir:
             parentFrameOrientation=parent_frame_orn,
             physicsClientId=self.sim.client_id,
         )
-        
-        # 4. Make constraint slightly soft to absorb simulation jitter
         p.changeConstraint(c_id, maxForce=2000)
 
     def _prepare_spatula(self, arm: str) -> None:
@@ -517,139 +245,45 @@ class TaskStir:
         joint_pos = self._inverse_kinematics(arm, target_above_pan, target_rotated_orn)
         self._move_arm_damp_velo(arm, joint_pos)
 
-        final_pos, final_orn = p.getBasePositionAndOrientation(spatula_id)
-        final_euler = p.getEulerFromQuaternion(final_orn)
-        print("\n=== FINAL SPATULA POSE ===")
-        print(f"Position:  {np.round(final_pos, 4)}")
-        print(f"Quaternion:{np.round(final_orn, 4)}")
-        print(f"Euler XYZ: {np.round(final_euler, 4)}")
-        print("==========================\n")
-
-        
-
-    # def _stir(self, pan_arm: str, spatula_arm: str) -> None:
-    #     # TODO : stirring
-    #     # --------------------------------------------------------------
-    #     # SIMPLE BACK-AND-FORTH STIRRING (linear motion)
-    #     # --------------------------------------------------------------
-
-    #     stir_amplitude = 0.12      # how far to move left/right (meters)
-    #     stir_height = 0.12         # vertical height above the pan
-    #     stir_cycles = 5            # number of back-and-forth passes
-    #     stir_steps = 90            # steps per half-stroke
-    #     stir_speed = 1.0           # scaling factor for arm velocity
-
-    #     print("\nStarting back-and-forth stirring...")
-
-    #     pan_id = self.sim.objects["pan"]["body_id"]
-    #     pan_pos, pan_orn = p.getBasePositionAndOrientation(pan_id)
-
-    #     pan_center = np.array(pan_pos)
-    #     base_height = pan_center[2] + stir_height
-
-    #     # The direction of motion (X axis of pan frame works fine)
-    #     # You can switch to Y axis by swapping indices.
-    #     forward_dir = np.array([1.0, 0.0, 0.0])
-
-    #     for cycle in range(stir_cycles):
-
-    #         # ---- FORWARD stroke ----
-    #         print("forward")
-    #         for i in range(stir_steps):
-    #             frac = i / stir_steps
-    #             delta = forward_dir * (frac * stir_amplitude)
-    #             target_pos = pan_center + np.array([delta[0], delta[1], stir_height])
-
-    #             joint_pos = self._inverse_kinematics(arm, target_pos, target_rotated_orn)
-    #             self.sim.set_joint_positions(joint_pos, arm)
-    #             # self._move_arm_damp_velo(arm, joint_pos)
-    #             self.sim.step_simulation(steps=20)
-
-    #         # ---- BACKWARD stroke ----
-    #         print("backward")
-    #         for i in range(stir_steps):
-    #             frac = i / stir_steps
-    #             delta = forward_dir * ((1 - frac) * stir_amplitude)
-    #             target_pos = pan_center + np.array([delta[0], delta[1], stir_height])
-
-    #             joint_pos = self._inverse_kinematics(arm, target_pos, target_rotated_orn)
-    #             # self._move_arm_damp_velo(arm, joint_pos, speed_scale=stir_speed)
-    #             self.sim.set_joint_positions(joint_pos, arm)
-    #             self.sim.step_simulation(steps=20)
-
-    #         print(f"Completed cycle {cycle + 1}/{stir_cycles}")
-
-    #     print("Back-and-forth stirring complete.\n")
-    #     pass
-
     def _stir(self, pan_arm: str, spatula_arm: str) -> None:
-        """
-        Executes a linear back-and-forth stirring motion.
-        1. Identifies pan orientation (to stir along the pan's axis).
-        2. Lowers spatula.
-        3. Moves linearly between two points inside the pan.
-        4. Retracts.
-        """
         LOGGER.info("Beginning linear stirring sequence...")
 
-        # === 1. GET GEOMETRY & REFERENCE FRAMES ===
         pan_id = self.sim.objects["pan"]["body_id"]
-        # Get pan state to handle potential movement/rotation
         pan_pos, pan_orn = p.getBasePositionAndOrientation(pan_id, physicsClientId=self.sim.client_id)
         pan_pos = np.array(pan_pos)
         
-        # Convert Pan Quaternion to Rotation Matrix to find local axes
         rot_matrix = np.array(p.getMatrixFromQuaternion(pan_orn)).reshape(3, 3)
-        # Typically, Local X aligns with the handle/length of the pan
         pan_axis_x = rot_matrix[:, 0] 
 
-        # === 2. DEFINE STIRRING PARAMETERS ===
-        # Safety height from pan center
         stir_z_height = pan_pos[2] + 0.03 
         
-        # How far to move from center (Amplitude)
-        # e.g., 0.06m means a total stroke length of 12cm
         amplitude = 0.24
         
-        # Calculate the two waypoints in World Coordinates
-        # Point A: Towards the handle (Back)
         target_a_pos = pan_pos - (pan_axis_x * amplitude)
         target_a_pos[2] = stir_z_height # Override Z
 
-        # Point B: Away from the handle (Forth)
         target_b_pos = pan_pos + (pan_axis_x * amplitude)
         target_b_pos[2] = stir_z_height # Override Z
 
-        # === 3. CAPTURE SPATULA ORIENTATION ===
-        # Maintain the tilt set in _prepare_spatula
         ee_link = self.sim.arm[spatula_arm].ee_link
         arm_body = self.sim.arm[spatula_arm].body_id
         _, current_orn = p.getLinkState(arm_body, ee_link, physicsClientId=self.sim.client_id)[:2]
 
-        # === 4. DESCEND TO START (POINT A) ===
         LOGGER.info("Descend into pan (Point A)...")
         j_start = self._inverse_kinematics(spatula_arm, target_a_pos, current_orn)
         self._move_arm_damp_velo(spatula_arm, j_start, k=2.0)
 
-        # === 5. EXECUTE LINEAR STIRRING LOOP ===
         num_cycles = 4
-        stir_speed_k = 3.5  # Gain for velocity control (higher = faster)
+        stir_speed_k = 3.5
         
         for i in range(num_cycles):
             LOGGER.info(f"Stir cycle {i+1}/{num_cycles}")
-            
-            # Move Forth (A -> B)
             j_b = self._inverse_kinematics(spatula_arm, target_b_pos, current_orn)
-            # Use loose tolerance (tol=0.015) for fluid motion, don't stop perfectly at the point
             self._move_arm_damp_velo(spatula_arm, j_b, k=stir_speed_k, tol=1e-3)
-            
-            # Move Back (B -> A)
             j_a = self._inverse_kinematics(spatula_arm, target_a_pos, current_orn)
             self._move_arm_damp_velo(spatula_arm, j_a, k=stir_speed_k, tol=1e-3)
 
-        # === 6. RETRACT ===
         LOGGER.info("Retracting spatula...")
-        # Get current position and add Z offset
         curr_pos = p.getLinkState(arm_body, ee_link, physicsClientId=self.sim.client_id)[0]
         retract_target = np.array(curr_pos) + np.array([0, 0, 0.15])
         
