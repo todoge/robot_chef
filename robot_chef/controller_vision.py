@@ -176,7 +176,6 @@ class VisionRefineController:
         gain: float = 0.35,
         max_joint_vel: float = 0.5,
     ) -> bool:
-        LOGGER.warning("IBVS called but likely not intended for fixed camera setup.")
         return True 
 
     def move_to_joint_target(
@@ -210,7 +209,7 @@ class VisionRefineController:
     def _get_arm_joint_states(self) -> Tuple[np.ndarray, np.ndarray]:
         """Gets current position and velocity for the 7 arm joints."""
         states = p.getJointStates(self.arm_id, self.arm_joints, physicsClientId=self.client_id)
-        q = np.array([state[0] for state in states], dtype=float)
+        q = np.array([state[0] for state in states], dtype=float)j
         dq = np.array([state[1] for state in states], dtype=float)
         return q, dq
 
