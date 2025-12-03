@@ -21,7 +21,6 @@ class Grasp_Predictor:
         (best_row, best_col): Tuple of center pixel coordinates of the best grasp region.
     """
 
-    # Step 1. Find the starting pixel (maximum quality)
     max_val = np.max(quality_map)
     start_pos = np.unravel_index(np.argmax(quality_map), quality_map.shape)
     threshold = threshold_ratio * max_val
@@ -30,7 +29,6 @@ class Grasp_Predictor:
     visited = np.zeros_like(quality_map, dtype=bool)
     region_pixels = []
 
-    # Step 2. BFS (4-connected)
     q = deque([start_pos])
     visited[start_pos] = True
 
@@ -38,16 +36,15 @@ class Grasp_Predictor:
         y, x = q.popleft()
         region_pixels.append((y, x))
 
-        for dy, dx in [(-1,0), (1,0), (0,-1), (0,1)]:  # neighbors
+        for dy, dx in [(-1,0), (1,0), (0,-1), (0,1)]:  
             ny, nx = y + dy, x + dx
             if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx]:
                 if quality_map[ny, nx] >= threshold:
                     visited[ny, nx] = True
                     q.append((ny, nx))
 
-    # Step 3. Compute region centroid
     if not region_pixels:
-        return start_pos  # fallback to max pixel
+        return start_pos 
 
     ys, xs = zip(*region_pixels)
     y_center = int(np.mean(ys))
@@ -80,26 +77,17 @@ class Grasp_Predictor:
   def predict_grasp(self, depth_normalized, bbox_mask = None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     self.grasp_prediction_model.eval()
-    # change (h,w) to (1,1,h,w) where channel and batch is 1
     depth_tensor = torch.from_numpy(depth_normalized).float().unsqueeze(0).unsqueeze(0).to(device)
     
     with torch.no_grad():
       output = self.grasp_prediction_model(depth_tensor)
-      #print("Output: ", output)
       
-      # GGCNN outputs a tuple of 4 tensors
-      # Q, cos, sin, width
-      # squeeze removes all dimensions of 1 so the batch and channel is removed
       quality, cos_map, sin_map, width = output
       quality_map = quality.squeeze().cpu().numpy()
-      # recommended to add some gaussian noise by GGCNN2
-      #quality_map = cv2.GaussianBlur(quality_map, (5,5), 0)
 
-      #quality_map = mask_edges(quality_map)
       cos_angle = cos_map.squeeze().cpu().numpy()
       sin_angle = sin_map.squeeze().cpu().numpy()
       width_map = width.squeeze().cpu().numpy()
-      # Convert cos/sin to angle
       angle_map = np.arctan2(sin_angle, cos_angle)
     
     if bbox_mask is not None:
@@ -107,21 +95,17 @@ class Grasp_Predictor:
       quality_map = quality_map * bbox_mask
       np.savetxt('grasp_quality.txt', quality_map, fmt='%.6f')
     
-    # Find best grasp (highest quality)
     best_idx = np.unravel_index(np.argmax(quality_map), quality_map.shape)
     y_center, x_center = best_idx
     '''
     top_mask = quality_map > 0.9 * np.max(quality_map)
     y_center, x_center = np.mean(np.argwhere(top_mask), axis=0)
     '''
-    #y_center, x_center = self._find_best_grasp_center(quality_map)
-
     print("y_center: ", y_center)
     print("x_center: ", x_center)
     best_row = int(y_center)
     best_col = int(x_center)
     
-    # Getting the corresponding Q, angles and widths
     grasp_quality = quality_map[best_row, best_col]
     grasp_angle = angle_map[best_row, best_col]
     grasp_width = width_map[best_row, best_col]

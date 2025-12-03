@@ -17,15 +17,12 @@ def parse_args():
 
 args = parse_args()
 
-# Load config and create environment with GUI enabled
 cfg = config.load_pour_task_config(Path(args.config))
-env = RobotChefSimulation(gui=True, recipe=cfg)  # Enable GUI for visualization
+env = RobotChefSimulation(gui=True, recipe=cfg)  
 
-# Load the trained model
 model = SAC.load(args.model_path)
 print(f"Loaded model from {args.model_path}")
 
-# Run visualization episodes
 for episode in range(args.episodes):
     obs, info = env.reset()
     done = False
@@ -35,18 +32,14 @@ for episode in range(args.episodes):
     print(f"\n=== Episode {episode + 1} ===")
     
     while not done:
-        # Predict action (deterministic=True for evaluation)
         action, _states = model.predict(obs, deterministic=True)
         
-        # Step environment
         obs, reward, done, truncated, info = env.step(action)
         episode_reward += reward
         step_count += 1
         
-        # Optional: add delay for better visualization
         time.sleep(0.01)
         
-        # Check if episode terminated
         if done or truncated:
             break
     

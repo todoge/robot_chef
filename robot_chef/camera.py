@@ -50,9 +50,6 @@ class Camera:
 
         self._update_matrices()
 
-    # ------------------------------------------------------------------ #
-    # Public API
-
     def aim_at(self, target_xyz: Sequence[float], distance: float, height_delta: float) -> None:
         """Reposition camera so that the supplied target sits near the image center."""
         target = np.asarray(target_xyz, dtype=float)
@@ -129,9 +126,6 @@ class Camera:
     @property
     def camera_from_world(self) -> np.ndarray:
         return self._camera_from_world.copy()
-
-    # ------------------------------------------------------------------ #
-    # Internals
 
     def _orientation_matrix(self) -> np.ndarray:
         rot = np.array(p.getMatrixFromQuaternion(self._orientation_quat), dtype=float).reshape(3, 3)

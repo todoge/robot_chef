@@ -74,7 +74,6 @@ class Object_Detector:
     
     min_row, max_row, min_col, max_col = self.bbox
     
-    # Add padding
     min_row = max(0, min_row - padding)
     max_row = min(self.img_size[0], max_row + padding)
     min_col = max(0, min_col - padding)

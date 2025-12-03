@@ -27,10 +27,6 @@ from .env.particles import ParticleSet, spawn_spheres
 LOGGER = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Data containers
-
-
 @dataclass
 class ArmState:
     body_id: int
@@ -50,9 +46,6 @@ class Pose:
         self.z = z
         self.orientation_rpy = orientation_rpy
 
-# --------------------------------------------------------------------------- #
-# Simulation
-
 
 class RobotChefSimulation(gym.Env):
     """Encapsulates the physics world, robot arms, and task objects."""
@@ -62,7 +55,6 @@ class RobotChefSimulation(gym.Env):
         self.gui = gui
         self.client_id = p.connect(p.GUI if gui else p.DIRECT)
 
-        #p.configureDebugVisualizer(p.COV_ENABLE_WIREFRAME, 1)
         LOGGER.info("Connected to PyBullet with client_id=%s (gui=%s)", self.client_id, gui)
 
         self.dt = 1.0 / 240.0
@@ -82,9 +74,7 @@ class RobotChefSimulation(gym.Env):
         self.objects: Dict[str, Dict[str, object]] = {}
         self.particles: Optional[ParticleSet] = None
 
-        # Default active arm is the right arm for pouring motions.
         self._active_arm_name = "left"
-        #self.gripper_open()
         self.step_simulation(steps=60)
 
         self.IMG_WIDTH = 224
@@ -96,11 +86,10 @@ class RobotChefSimulation(gym.Env):
 
         self.saved_state_id = None
         
-        # Grasp execution parameters
-        self.RECALIBRATE_HEIGHT = 0.55  # Height above for predicting grasp processing
-        self.APPROACH_HEIGHT = 0.35  # Height above object for pre-grasp
-        self.GRASP_CLEARANCE = 0.1  # Clearance when grasping
-        self.LIFT_HEIGHT = 0.25      # Height to lift object to
+        self.RECALIBRATE_HEIGHT = 0.55  
+        self.APPROACH_HEIGHT = 0.35  
+        self.GRASP_CLEARANCE = 0.1  
+        self.LIFT_HEIGHT = 0.25      
         self.FRAME_MARKER_URDF = os.path.join(os.path.dirname(os.path.realpath(__file__)), "env/frame_marker.urdf")
         self.eef_marker = p.loadURDF(self.FRAME_MARKER_URDF, [0, 0, 0], useFixedBase=True, globalScaling=0.18)
 
@@ -122,10 +111,9 @@ class RobotChefSimulation(gym.Env):
                 physicsClientId=self.client_id,
             )
             self.objects["table"] = {"body_id": table_id, "base_position": table_pos}
-            # Pedestals with collision-safe placement and arm mounting
             left_mount_id, right_mount_id, z_table = self._place_pedestals_clear_of_table(
-                side=0.20,   # 20 cm square column
-                margin=0.08  # 8 cm clearance from table edges
+                side=0.20,   
+                margin=0.08  
             )
 
             self.objects["left_mount"] = {"body_id": left_mount_id, "top_z": z_table}
@@ -161,7 +149,6 @@ class RobotChefSimulation(gym.Env):
             self.setup_camera(ee_pos, ee_orn)
             rgb, depth_buffer, depth_norm, _= self.camera.get_rgbd()
             pixel_row, pixel_col, grasp_angle, grasp_width, quality, quality_map, angle_map, width_map = self.grasping_predictor.predict_grasp(depth_norm)
-            #self.grasping_predictor.visualize_grasp_predictions(depth_norm, quality_map, angle_map, width_map, pixel_row, pixel_col, "grasp_visualisation_recali.png")
             coord = self.pixel_to_world(pixel_row, pixel_col, depth_buffer)
             self.set_grasping_keyposes(coord)
             self.move_arm_to_pose("left", self.keyposes["pregrasp"], down_orn, max_secs=3.0)
@@ -198,13 +185,10 @@ class RobotChefSimulation(gym.Env):
         denorm_action = []
         for i, a in enumerate(action):
             low, high = joint_limits[i]
-            # Scale from [-1,1] to [low, high]
             scaled = low + (a + 1.0) * 0.5 * (high - low)
             denorm_action.append(scaled)
         for idx in range(7):
-            # Map action[idx] from [-1,1] to joint limit range (example)
-            # You need to define real joint limits here for safety
-            target_pos = denorm_action[idx]  # example scaling
+            target_pos = denorm_action[idx]  
             p.setJointMotorControl2(arm.body_id, idx, p.POSITION_CONTROL, targetPosition=target_pos, maxVelocity=1.0, force=80)
 
         p.stepSimulation()
@@ -354,25 +338,20 @@ class RobotChefSimulation(gym.Env):
             
         bowl_pos = np.array(bowl_pos)
 
-        # Unpack bowl parameters (all assumed scaled and in world units)
         total_height = bowl_params["inner_height"] + bowl_params["base_thickness"]
         inner_radius = bowl_params["inner_radius"]
 
-        # Calculate vertical boundaries relative to bowl center position
         bowl_bottom_z = bowl_pos[2] - (total_height / 2)
         bowl_top_z = bowl_pos[2] + (total_height / 2)
 
-        # Define a radius threshold (inner radius of bowl) for horizontal check
         radius_threshold = inner_radius
 
         for ball_id in self.particles.body_ids:
             ball_pos, _ = p.getBasePositionAndOrientation(ball_id)
             ball_pos = np.array(ball_pos)
 
-            # Horizontal distance in XY plane from bowl center
             dist_xy = np.linalg.norm(ball_pos[:2] - bowl_pos[:2])
 
-            # Check ball inside bowl horizontal radius and between bottom and top Z
             if dist_xy <= radius_threshold and bowl_bottom_z <= ball_pos[2] <= bowl_top_z:
                 count += 1
 
@@ -380,13 +359,10 @@ class RobotChefSimulation(gym.Env):
 
     
     def render(self):
-        # Optional slow down for visualization
-        time.sleep(1./240.)  # Sleep for one simulation timestep (default 240 Hz)
+        time.sleep(1./240.) 
     
     def close(self):
         p.disconnect(self.physics_client)
-
-    # ---------- Mounts / pedestals with clearance ---------- #
 
     def _get_table_footprint(self) -> Tuple[Tuple[float, float], float, float, float, float]:
         """
@@ -422,13 +398,9 @@ class RobotChefSimulation(gym.Env):
         ux, uy = self._table_local_axes(yaw)
 
         ped_half = side * 0.5
-        # Distance behind back edge (−x_table) to avoid collisions
         back_clear = half_x + margin + ped_half
 
-        # Lateral (±y_table) placement near the table edges with clearance
         lat_clear = max(0.0, half_y - margin - ped_half)
-        # World XY for left/right mounts
-        # left = +y_table; right = −y_table
         left_xy = (cx - ux[0] * back_clear + uy[0] * lat_clear,
                    cy - ux[1] * back_clear + uy[1] * lat_clear)
         right_xy = (cx - ux[0] * back_clear - uy[0] * lat_clear,
@@ -443,13 +415,13 @@ class RobotChefSimulation(gym.Env):
         Create a fixed mount (square column) from floor to top_z at world XY.
         The column is a box of size (side, side, height). Uses collision + visual.
         """
-        height = max(0.05, float(top_z))  # from z=0 (floor) up to top_z
+        height = max(0.05, float(top_z)) 
         half_extents = (side / 2.0, side / 2.0, height / 2.0)
         col_id = p.createCollisionShape(p.GEOM_BOX, halfExtents=half_extents, physicsClientId=self.client_id)
         vis_id = p.createVisualShape(
             p.GEOM_BOX,
             halfExtents=half_extents,
-            rgbaColor=[0.35, 0.35, 0.38, 1.0],  # neutral “metallic” tone
+            rgbaColor=[0.35, 0.35, 0.38, 1.0], 
             physicsClientId=self.client_id,
         )
         body_id = p.createMultiBody(
@@ -462,8 +434,6 @@ class RobotChefSimulation(gym.Env):
         )
         p.changeDynamics(body_id, -1, lateralFriction=1.0, spinningFriction=0.6, physicsClientId=self.client_id)
         return body_id
-
-    # ---------- Arm spawning ---------- #
 
     def _spawn_arm(self, base_position: Sequence[float], base_orientation: Sequence[float]) -> ArmState:
         flags = p.URDF_USE_SELF_COLLISION | p.URDF_USE_SELF_COLLISION_EXCLUDE_ALL_PARENTS
@@ -499,7 +469,6 @@ class RobotChefSimulation(gym.Env):
         if len(joint_indices) != 7:
             raise RuntimeError("Expected Franka Panda arm with 7 revolute joints")
 
-        # Find Panda end-effector link "panda_hand".
         ee_link_index = None
         for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
             info = p.getJointInfo(arm_id, j, physicsClientId=self.client_id)
@@ -513,9 +482,8 @@ class RobotChefSimulation(gym.Env):
         n = p.getNumJoints(arm_id)
         link_names = [p.getJointInfo(arm_id, j)[12].decode("utf-8") for j in range(n)]
         eef_link_name = "panda_hand"
-        eef = link_names.index(eef_link_name) #returns eef coordinate, ee_link_index is joint index
+        eef = link_names.index(eef_link_name)
 
-        # Finger joints.
         finger_joint_names = {"panda_finger_joint1", "panda_finger_joint2"}
         fingers: List[int] = []
         for j in range(p.getNumJoints(arm_id, physicsClientId=self.client_id)):
@@ -525,7 +493,6 @@ class RobotChefSimulation(gym.Env):
         if len(fingers) != 2:
             raise RuntimeError("Failed to locate Panda finger joints")
 
-        # Initialize arm joints.
         for idx in joint_indices:
             p.resetJointState(arm_id, idx, targetValue=0.0, targetVelocity=0.0, physicsClientId=self.client_id)
             p.setJointMotorControl2(
@@ -556,10 +523,6 @@ class RobotChefSimulation(gym.Env):
             pos, orn = p.getLinkState(arm.body_id, arm.eef)[4:6]
             p.resetBasePositionAndOrientation(self.eef_marker, pos, orn)
         p.stepSimulation()
-        #time.sleep(1./240.) #removed for rl
-
-    # ------------------------------------------------------------------ #
-    # Public API
 
     def setup_camera(self, eef_pos, eef_orn):
       cam_offset = [0, 0, 0.05]
@@ -604,7 +567,7 @@ class RobotChefSimulation(gym.Env):
             physicsClientId=self.client_id,
         )
 
-    def set_joint_velocities( #Unused
+    def set_joint_velocities(
         self,
         qdot_target: Sequence[float],
         arm: Optional[str] = None,
@@ -700,9 +663,6 @@ class RobotChefSimulation(gym.Env):
         if p.isConnected(self.client_id):
             p.disconnect(self.client_id)
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-
     def _get_arm(self, arm: Optional[str]) -> ArmState:
         arm_name = arm or self._active_arm_name
         if arm_name == "left":
@@ -753,27 +713,22 @@ class RobotChefSimulation(gym.Env):
             physicsClientId=self.client_id,
         )
 
-    # Backwards-compatible alias (used by older code)
     def _place_on_table(self, body_id: int, z_table: float) -> None:
         self._place_on_support(body_id, support_top_z=z_table)
 
     def spawn_one_keypose_markers(self, pos, name, scale=0.1):
-      down_orn = p.getQuaternionFromEuler([math.pi, 0, 0]) #gripper to look down
+      down_orn = p.getQuaternionFromEuler([math.pi, 0, 0])
       p.loadURDF(self.FRAME_MARKER_URDF, pos, down_orn, useFixedBase=True, globalScaling=scale)
-      # Add text above the frame
       text_pos = [pos[0], pos[1], pos[2] + 0.01]
       p.addUserDebugText(name, text_pos, textColorRGB=[1, 1, 0], textSize=1.2)
 
-    # Tutorial code to spawn markers for visualisation
     def _spawn_keypose_markers(self, scale=0.1):
       for name, pos in self.keyposes.items():
-        down_orn = p.getQuaternionFromEuler([math.pi, 0, 0]) #gripper to look down
+        down_orn = p.getQuaternionFromEuler([math.pi, 0, 0])
         p.loadURDF(self.FRAME_MARKER_URDF, pos, down_orn, useFixedBase=True, globalScaling=scale)
-        # Add text above the frame
         text_pos = [pos[0], pos[1], pos[2] + 0.01]
         p.addUserDebugText(name, text_pos, textColorRGB=[1, 1, 0], textSize=1.2)
 
-    # Tutorial code
     def _smooth_joint_targets(self, body_id: int, joint_indices: List[int], ik_targets: List[float], step_size=0.02):
         out = []
         for k, j in enumerate(joint_indices):
@@ -806,7 +761,6 @@ class RobotChefSimulation(gym.Env):
 
       self._spawn_keypose_markers()
 
-    # Tutorial code (slightly modified to fit class)
     def move_arm_to_pose(self, arm,
                      target_pos: List[float],
                      target_orn: Tuple[float, float, float, float],
@@ -836,7 +790,6 @@ class RobotChefSimulation(gym.Env):
                 p.resetBasePositionAndOrientation(self.eef_marker, pos, orn)
 
             p.stepSimulation()
-            #time.sleep(self.dt) #removed for rl
 
             pos, orn = p.getLinkState(arm.body_id, arm.eef)[4:6]
             pos_err = np.linalg.norm(np.array(pos) - np.array(target_pos))
@@ -849,29 +802,23 @@ class RobotChefSimulation(gym.Env):
                            img_width=224, img_height=224):
       depth_buffer = depth_image
 
-      # Convert pixel to NDC coordinates
       x_ndc = (2.0 * pixel_col / img_width) - 1.0
       y_ndc = 1.0 - (2.0 * pixel_row / img_height)
       z_ndc = 2.0 * depth_buffer[pixel_row, pixel_col] - 1.0
       
-      # Create homogeneous NDC point
       ndc_point = np.array([x_ndc, y_ndc, z_ndc, 1.0])
       
-      # Get inverse matrices
       view_matrix_np = self.camera._view_matrix.T
       proj_matrix_np = self.camera._projection_matrix.T
       
       view_inv = np.linalg.inv(view_matrix_np)
       proj_inv = np.linalg.inv(proj_matrix_np)
       
-      # Unproject: NDC -> Clip -> Camera -> World
       clip_point = proj_inv @ ndc_point
       
-      # Perspective divide
       if clip_point[3] != 0:
           clip_point = clip_point / clip_point[3]
       
-      # Transform to world space
       world_point = view_inv @ clip_point
       
       return [world_point[0], world_point[1], world_point[2]]    
@@ -880,23 +827,21 @@ class RobotChefSimulation(gym.Env):
         arm = self._get_arm(arm)
         start_pos = np.array(pregrasp_pose)
         end_pos = np.array(grasp_pose)
-        down_orn = p.getQuaternionFromEuler([math.pi, 0, 0]) #gripper to look down
+        down_orn = p.getQuaternionFromEuler([math.pi, 0, 0]) 
         steps = 500
-        half_steps = steps // 2 # rotation of gripper should reach endgoal halfway down
+        half_steps = steps // 2
         trajectory = [start_pos + (end_pos - start_pos) * t/steps for t in range(steps+1)]
         orn_traj = []
         for i in range(half_steps):
-            t = i / (half_steps - 1)   # normalized [0,1] for slerp smoothness
+            t = i / (half_steps - 1) 
             q = p.getQuaternionSlerp(down_orn, grasp_orn, t)
             orn_traj.append(q)
         for i in range(steps - half_steps):
-            orn_traj.append(grasp_orn) # fix gripper angled position for the rest of the journey
+            orn_traj.append(grasp_orn)
 
         for pos, orn in zip(trajectory, orn_traj):
           joint_pos = p.calculateInverseKinematics(arm.body_id, arm.eef, pos, orn)[:-2]
           p.setJointMotorControlArray(arm.body_id, arm.joint_indices, p.POSITION_CONTROL, joint_pos)
           p.stepSimulation()
-          #time.sleep(self.dt) # [IMPT]: reduce jumping of joints for real life time simulation, removed for rl
-
 
 __all__ = ["RobotChefSimulation", "ArmState"]

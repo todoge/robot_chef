@@ -11,13 +11,11 @@ import pybullet as p
 LOGGER = logging.getLogger("robot_chef.controller")
 
 def _damped_pinv(J: np.ndarray, lam: float = 1e-4) -> np.ndarray:
-    # Tikhonov-regularized pseudoinverse: (JᵀJ + λ²I)⁻¹ Jᵀ
     JTJ = J.T @ J
     n = JTJ.shape[0]
     return np.linalg.solve(JTJ + (lam * lam) * np.eye(n), J.T)
 
 def _quat_mul(q1: Sequence[float], q2: Sequence[float]) -> np.ndarray:
-    # Hamilton product, xyzw
     x1, y1, z1, w1 = q1
     x2, y2, z2, w2 = q2
     return np.array([
@@ -57,10 +55,8 @@ class VisionRefineController:
         self._open = gripper_open or (lambda width=0.08: None)
         self._close = gripper_close or (lambda force=60.0: None)
 
-        # Cache sizes
         self._num_joints = p.getNumJoints(self.arm_id, physicsClientId=self.client_id)
 
-    # ---------- Full state helpers (important for calculateJacobian) ----------
 
     def _full_joint_vectors(self) -> Tuple[List[float], List[float], List[float]]:
         q, dq = [], []
@@ -72,11 +68,7 @@ class VisionRefineController:
         return q, dq, dd
 
     def _arm_column_selector(self) -> List[int]:
-        # Map arm_joints (indices on body) into column indices of full Jacobian
-        # Jacobian returns columns in joint index order [0..numJoints-1]
         return list(self.arm_joints)
-
-    # --------------------------- Public API -----------------------------------
 
     def open_gripper(self, width: float = 0.08) -> None:
         self._open(width)
@@ -86,7 +78,6 @@ class VisionRefineController:
 
     def move_waypoint(self, pos: Sequence[float], quat_xyzw: Sequence[float], max_steps: int = 240) -> bool:
         """Robust waypoint move using IK + position control."""
-        # Use null-space IK with correct 7-DoF arrays; fall back to basic IK.
         try:
             q_sol = p.calculateInverseKinematics(
                 self.arm_id,
@@ -101,12 +92,10 @@ class VisionRefineController:
             LOGGER.error("IK exception: %s", exc)
             return False
 
-        # Apply to the 7 arm joints only
         if not q_sol or len(q_sol) < max(self.arm_joints) + 1:
             LOGGER.error("IK returned undersized solution.")
             return False
 
-        # Drive joints for a short horizon
         for _ in range(max_steps):
             for j_idx, j in enumerate(self.arm_joints):
                 p.setJointMotorControl2(
@@ -122,7 +111,7 @@ class VisionRefineController:
     def refine_to_features_ibvs(
         self,
         *,
-        get_features: Callable[[], Tuple[np.ndarray, np.ndarray]],  # returns (uv: (2N,), Z: (N,))
+        get_features: Callable[[], Tuple[np.ndarray, np.ndarray]], 
         target_uv: np.ndarray,
         target_Z: np.ndarray,
         pixel_tol: float = 3.0,
@@ -142,7 +131,6 @@ class VisionRefineController:
                 LOGGER.warning("IBVS: invalid features at step %d", step)
                 return False
 
-            # Error in pixels (vectorized)
             e_px = (uv - target_uv).reshape(-1, 1)  # (2N,1)
             rms_px = float(np.sqrt(np.mean(e_px**2)))
             mean_dz = float(np.mean(np.abs(Z - target_Z)))
@@ -150,51 +138,42 @@ class VisionRefineController:
                 LOGGER.info("VisionRefineController: IBVS grasp refine success (rms=%.2f px, dZ=%.4f m)", rms_px, mean_dz)
                 return True
 
-            # Build interaction matrix L for point features (u,v) with depth Z (pinhole approx.)
             N = len(Z)
-            fx = fy = 1.0  # using pixel domain; absorbed in gain
+            fx = fy = 1.0 
             L_blocks = []
             for i in range(N):
                 Zi = max(1e-3, float(Z[i]))
                 ui, vi = float(uv[2*i]), float(uv[2*i+1])
-                # normalized image gradients (approx) – classic IBVS 2D point:
-                # [-fx/Z, 0, u/Z, u*v/fx, -(fx^2+u^2)/fx, v]
-                # [0, -fy/Z, v/Z, (fy^2+v^2)/fy, -u*v/fy, -u]
                 L_i = np.array([
                     [-fx / Zi, 0.0, ui / Zi,  ui*vi / fx, -(fx*fx + ui*ui) / fx,  vi],
                     [0.0, -fy / Zi, vi / Zi,  (fy*fy + vi*vi) / fy, -ui*vi / fy, -ui],
                 ], dtype=float)
                 L_blocks.append(L_i)
-            L = np.vstack(L_blocks)  # (2N,6)
+            L = np.vstack(L_blocks) 
 
-            # Camera twist (v_cam) to reduce pixel error
-            v_cam = -gain * _damped_pinv(L, lam=1e-3) @ e_px  # (6,1)
-            v_cam = v_cam.flatten()  # [vx, vy, vz, wx, wy, wz] in camera frame
+            v_cam = -gain * _damped_pinv(L, lam=1e-3) @ e_px 
+            v_cam = v_cam.flatten() 
 
-            # Map camera twist to end-effector twist via hand-eye (approx: same frame)
-            v_eef = v_cam  # if you have a calibrated T_cam_eef, rotate here
+            v_eef = v_cam 
 
-            # Map to joint velocities using full Jacobian, then select arm columns
             q_full, dq_full, dd_full = self._full_joint_vectors()
             pos_jac, orn_jac = p.calculateJacobian(
                 self.arm_id,
                 self.ee_link,
-                [0.0, 0.0, 0.0],  # local pos at eef
+                [0.0, 0.0, 0.0], 
                 q_full,
                 dq_full,
                 dd_full,
                 physicsClientId=self.client_id,
             )
-            Jp = np.asarray(pos_jac, dtype=float)  # (3, numJoints)
-            Jo = np.asarray(orn_jac, dtype=float)  # (3, numJoints)
-            J_full = np.vstack([Jp, Jo])           # (6, numJoints)
-            # Select columns for the 7 arm joints
-            J = J_full[:, arm_cols]                # (6, 7)
+            Jp = np.asarray(pos_jac, dtype=float) 
+            Jo = np.asarray(orn_jac, dtype=float) 
+            J_full = np.vstack([Jp, Jo])          
+            J = J_full[:, arm_cols]
 
-            qdot_arm = _damped_pinv(J, lam=1e-3) @ v_eef.reshape(6, 1)  # (7,1)
+            qdot_arm = _damped_pinv(J, lam=1e-3) @ v_eef.reshape(6, 1)
             qdot_arm = _clamp(qdot_arm.flatten(), max_joint_vel)
 
-            # Command joint velocity on arm joints; others zero
             for k, j in enumerate(self.arm_joints):
                 p.setJointMotorControl2(
                     self.arm_id, j, p.VELOCITY_CONTROL,

@@ -13,12 +13,12 @@ def parse_args():
 
 
 args = parse_args()
-from robot_chef import config  # agent will create
+from robot_chef import config  
 cfg = config.load_pour_task_config(Path(args.config))
 env = RobotChefSimulation(gui=not args.headless, recipe=cfg)
-#obs, info = env.reset()
+
 model = SAC(
-        "MlpPolicy",   # Multilayer perceptron policy (fully connected)
+        "MlpPolicy",   
         env,
         verbose=1,
         batch_size=256,
@@ -35,11 +35,9 @@ model = SAC(
 #model.set_env(env)
 checkpoint_callback = CheckpointCallback(save_freq=10000, save_path='./models/', name_prefix='franka_sac')
     
-# 4. Start learning (training)
-total_timesteps = 500_000  # set as needed
+total_timesteps = 500_000 
 model.learn(total_timesteps=total_timesteps, callback=checkpoint_callback)
 
-# 5. Save the final model
 model.save("pouring_final")
 
 env.close()

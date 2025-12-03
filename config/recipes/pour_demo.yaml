@@ -11,10 +11,10 @@ tolerances:
   place_back_yaw_deg: 8
 
 scene:
-  world_yaw_deg: 0   # keep 0 while debugging depth
+  world_yaw_deg: 0
 
 camera:
-  active_view: oblique   # ‘top’ works too, but oblique is easier for rim
+  active_view: oblique
   near: 0.05
   far: 5.0
   views:
@@ -32,7 +32,6 @@ perception:
   bowl_roi_margin_m: 0.12
   rim_sample_count: 24
   grasp_clearance_m: 0.02
-  # (optional) expose rim thickness if you want to tweak FC behavior
   rim_thickness_m: 0.006
 
 task:
@@ -41,7 +40,7 @@ task:
   hold_sec: 3.0
 
   noise:
-    depth_std: 0.0   # turn off while debugging depth
-    drop_prob: 0.0   # turn off while debugging depth
+    depth_std: 0.0
+    drop_prob: 0.0
 
 seed: 7

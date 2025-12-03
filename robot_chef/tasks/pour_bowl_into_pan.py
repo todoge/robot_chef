@@ -89,9 +89,6 @@ class PourBowlIntoPanAndReturn:
         self.cfg: Optional[PourTaskConfig] = None
         self._metrics: Dict[str, float] = {"transfer_ratio": 0.0, "in_pan": 0, "total": 0}
 
-    # ------------------------------------------------------------------ #
-    # Task lifecycle
-
     def setup(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> None:
         print(sim.objects.keys())
         self.sim = sim
@@ -139,7 +136,6 @@ class PourBowlIntoPanAndReturn:
         
 
     def plan(self, sim: RobotChefSimulation, cfg: PourTaskConfig) -> bool:
-        # The dynamic plan depends on perception; defer heavy lifting to execute().
         LOGGER.info("Planning completed (perception-driven execution).")
         return True
 
@@ -162,9 +158,6 @@ class PourBowlIntoPanAndReturn:
 
     def metrics(self, sim: RobotChefSimulation) -> Dict[str, float]:
         return dict(self._metrics)
-
-    # ------------------------------------------------------------------ #
-    # Internal helpers
 
     def _run_perception(
         self,
@@ -297,7 +290,6 @@ class PourBowlIntoPanAndReturn:
                 LOGGER.warning("IBVS refinement failed for candidate %d", idx + 1)
                 continue
 
-            # Descend slightly to engage the rim.
             grasp_pose = position.copy()
             grasp_pose[2] += max(0.0, cfg.perception.rim_thickness_m * 0.5)
             if not self.controller.move_waypoint(grasp_pose, quat):
@@ -307,18 +299,15 @@ class PourBowlIntoPanAndReturn:
             self.controller.close_gripper()
             sim.step_simulation(steps=120)
 
-            # Lift bowl.
             lift_pose = grasp_pose.copy()
             lift_pose[2] += 0.12
             self.controller.move_waypoint(lift_pose, quat)
 
-            # Move above pan.
             pan_pose_world = sim.objects["pan"]["pose"]
             pan_quat = _pose_to_quaternion(pan_pose_world)
             above_pan = np.array([pan_pose_world.x, pan_pose_world.y, pan_pose_world.z + 0.25])
             self.controller.move_waypoint(above_pan, pan_quat)
 
-            # Pour tilt.
             pan_pour_pose = _apply_world_yaw(cfg.pan_pour_pose, cfg.scene.world_yaw_deg)
             pour_quat = p.getQuaternionFromEuler([pan_pour_pose.roll, pan_pour_pose.pitch, pan_pour_pose.yaw])
             pour_pos = np.array([pan_pour_pose.x, pan_pour_pose.y, pan_pour_pose.z])
@@ -327,7 +316,6 @@ class PourBowlIntoPanAndReturn:
             for _ in range(hold_steps):
                 sim.step_simulation(steps=1)
 
-            # Return towards bowl and place.
             above_bowl = np.array([lift_pose[0], lift_pose[1], lift_pose[2]])
             self.controller.move_waypoint(above_bowl, quat)
             place_pose = grasp_pose.copy()

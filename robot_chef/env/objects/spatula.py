@@ -26,11 +26,10 @@ def create_spatula(client_id, pose, mass=0.3, friction=2.0):
         baseVisualShapeIndex=visual_shape_id,
         basePosition=[pose.x, pose.y, pose.z],
         baseOrientation=orientation,
-        baseInertialFramePosition=[0, 0, 0],  # usually center of mass, adjust if needed
-        baseInertialFrameOrientation=[0, 0, 0, 1],  # usually identity quaternion
+        baseInertialFramePosition=[0, 0, 0],  
+        baseInertialFrameOrientation=[0, 0, 0, 1],  
         physicsClientId=client_id,
     )
-    # Set friction and damping to reduce sliding
     p.changeDynamics(
         bodyUniqueId=body_id,
         linkIndex=-1,
